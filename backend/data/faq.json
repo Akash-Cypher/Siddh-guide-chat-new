@@ -1,0 +1,18 @@
+[
+  {
+    "keywords": ["service", "provide", "offer"],
+    "answer": "We provide a variety of high-quality online courses in Python, Machine Learning, Web Development, and Databases. We also offer personalized mentorship and career guidance."
+  },
+  {
+    "keywords": ["hiring", "job", "career", "work"],
+    "answer": "We are always looking for talented individuals! Please check our careers page at [link to careers page] or email your resume to careers@siddhguide.com."
+  },
+  {
+    "keywords": ["price", "cost", "fee"],
+    "answer": "The price for each course varies. You can find detailed pricing information on the specific course page on our website. For the courses I have information about, please ask about a specific course."
+  },
+  {
+    "keywords": ["login", "lms", "issue", "problem", "access"],
+    "answer": "For any issues with your Learning Management System (LMS) login or access, please contact our support team at lmsadmin@srisiddhanta.org. They will be happy to assist you."
+  }
+]

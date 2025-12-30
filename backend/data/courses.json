@@ -1,22 +1,22 @@
 [
   {
-    "id": "CS101-001",
-    "title": "Introduction to Python Programming - Syllabus",
-    "content": "This course provides an introduction to programming in Python. Topics include data types, control flow, functions, and an introduction to object-oriented programming. The final project will be to build a simple chatbot."
+    "id": "PY001",
+    "title": "Introduction to Python Programming",
+    "content": "This course is a beginner-friendly introduction to Python. It covers fundamental concepts such as variables, data types, loops, and functions. No prior programming experience is required. The course is ideal for those starting their journey in software development or data science."
   },
   {
-    "id": "CS101-002",
-    "title": "Introduction to Python Programming - Week 1 Lecture",
-    "content": "In week 1, we will cover the basics of Python. This includes installing Python, writing your first 'Hello, World!' program, and understanding variables and basic data types like integers, floats, and strings."
+    "id": "ML001",
+    "title": "Basics of Machine Learning",
+    "content": "Our Machine Learning course introduces the foundational principles of ML. Students will learn about supervised vs. unsupervised learning, common algorithms like linear regression and k-means clustering, and how to evaluate model performance. A basic understanding of Python is recommended."
   },
   {
-    "id": "CS101-003",
-    "title": "Introduction to Python Programming - Week 2 Lecture",
-    "content": "Week 2 focuses on control flow. We will learn about if-else statements for conditional logic and for/while loops for iteration. We will also cover lists and how to work with them."
+    "id": "WEB001",
+    "title": "Web Development Fundamentals",
+    "content": "Learn to build modern websites in our Web Development course. We cover the core technologies of the web: HTML for structure, CSS for styling, and JavaScript for interactivity. This course provides the building blocks for a career in front-end or full-stack development."
   },
   {
-    "id": "FIN205-001",
-    "title": "Financial Markets - Course Overview",
-    "content": "This course is an overview of financial markets. We will discuss the roles of different financial institutions, the types of securities traded, and the basics of stock and bond valuation."
+    "id": "DB001",
+    "title": "Introduction to SQL Databases",
+    "content": "This course covers the fundamentals of SQL and relational databases. You will learn how to query data, create tables, and manage database schemas. Understanding SQL is a critical skill for back-end developers, data analysts, and anyone working with large datasets."
   }
 ]
