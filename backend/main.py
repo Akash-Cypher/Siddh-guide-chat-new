@@ -6,8 +6,9 @@ from models import generate_answer
 from typing import List, Dict
 import json
 import re
+from fastapi.staticfiles import StaticFiles
 
-app = FastAPI(title="Sidh Guide Chatbot")
+app = FastAPI(title="Siddh Guide Chatbot")
 
 app.add_middleware(
     CORSMiddleware,
@@ -99,6 +100,9 @@ async def chat(request: ChatRequest) -> Dict:
 async def ingest():
     ingest_data()
     return {"status": "ingested"}
+
+# Mount the frontend directory containing the UI
+app.mount("/", StaticFiles(directory="frontend", html=True), name="frontend")
 
 if __name__ == "__main__":
     import uvicorn

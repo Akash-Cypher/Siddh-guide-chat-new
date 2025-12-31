@@ -1,0 +1,13 @@
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.env
+.git
+.gitignore
+# Exclude local chroma_db if you plan to mount it or rebuild it
+chroma_db/
+data/

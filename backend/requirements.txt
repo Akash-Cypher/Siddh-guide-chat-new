@@ -5,4 +5,3 @@ numpy<2.0
 sentence-transformers
 boto3
 pydantic
-mangum

@@ -1,3 +1,7 @@
+// The URL to your AWS backend.
+// Replace this with the actual API Gateway URL.
+const API_URL = 'https://YOUR_AWS_API_GATEWAY_URL/chat';
+
 document.addEventListener('DOMContentLoaded', () => {
     const chatToggleButton = document.getElementById('chatToggleButton');
     const chatWindow = document.getElementById('chatWindow');
@@ -15,32 +19,26 @@ document.addEventListener('DOMContentLoaded', () => {
     let proactiveIndex = 0;
     let proactiveInterval;
 
-    // --- Proactive Messaging Logic ---
     function showProactiveMessage() {
         proactiveMessage.textContent = proactiveMessages[proactiveIndex];
         proactiveMessage.classList.add('visible');
-
-        // Hide the message after some time
         setTimeout(() => {
             proactiveMessage.classList.remove('visible');
-        }, 5000); // Message is visible for 5 seconds
-
+        }, 5000);
         proactiveIndex = (proactiveIndex + 1) % proactiveMessages.length;
     }
-    
-    // Start showing proactive messages after a delay, only if chat is closed
+
     function startProactiveMessaging() {
         if (chatWindow.classList.contains('visible')) return;
-        stopProactiveMessaging(); // Ensure no multiple intervals are running
-        proactiveInterval = setInterval(showProactiveMessage, 8000); // Show a new message every 8 seconds
+        stopProactiveMessaging();
+        proactiveInterval = setInterval(showProactiveMessage, 8000);
     }
 
     function stopProactiveMessaging() {
         clearInterval(proactiveInterval);
         proactiveMessage.classList.remove('visible');
     }
-    
-    // --- Chat Window Toggle Logic ---
+
     chatToggleButton.addEventListener('click', () => {
         const isVisible = chatWindow.classList.toggle('visible');
         if (isVisible) {
@@ -51,7 +49,6 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    // --- Message Handling Logic ---
     chatForm.addEventListener('submit', (e) => {
         e.preventDefault();
         const messageText = userInput.value.trim();
@@ -76,7 +73,7 @@ document.addEventListener('DOMContentLoaded', () => {
         botMessageElement.classList.add('typing');
 
         try {
-            const response = await fetch('/chat', {
+            const response = await fetch(API_URL, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -101,8 +98,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function typewriterEffect(element, text) {
         let i = 0;
-        element.textContent = ''; // Clear the initial 'typing' content
-        const speed = 30; // Milliseconds per character
+        element.textContent = '';
+        const speed = 30;
 
         function type() {
             if (i < text.length) {
@@ -115,7 +112,5 @@ document.addEventListener('DOMContentLoaded', () => {
         type();
     }
 
-    // --- Initial State ---
-    // Start proactive messaging a few seconds after the page loads
     setTimeout(startProactiveMessaging, 3000);
 });
