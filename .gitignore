@@ -1,20 +1,34 @@
-# Python
+# Byte-compiled / optimized / DLL files
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
 *.pyd
-*build/
-*dist/
-*egg-info/
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+sdist/
+wheels/
+
+# Environments
 venv/
 .venv/
+.env*
+/backend/venv/
 
 # Database
 chroma_db/
-
-# Environment variables
-.env*
+/backend/chroma_db/
 
 # IDE specific
 .vscode/
 .idea/
+
+# Temp files
+*.log
+*.tmp
+*.swp
+*.bak
+
+# Specific files to ignore
+messsage ton handover the frontend to the wordpress team.txt
