@@ -1,13 +1,19 @@
-__pycache__
+__pycache__/
 *.pyc
 *.pyo
 *.pyd
 .Python
 env/
 venv/
+.venv/
 .env
-.git
+.git/
 .gitignore
-# Exclude local chroma_db if you plan to mount it or rebuild it
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+dist/
+build/
+*.egg-info/
 chroma_db/
-data/

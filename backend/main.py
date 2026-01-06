@@ -1,14 +1,17 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from rag import init_rag, query_rag, ingest_data
-from models import generate_answer
-from typing import List, Dict
+from typing import Dict
 import json
 import re
 
+from models import generate_answer
+from rag import init_rag, retrieve_context
+from cache import get_cached, put_cached
+
 app = FastAPI(title="Siddh Guide Chatbot")
 
+# TODO later: replace "*" with your WordPress domain to avoid abuse
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -23,84 +26,69 @@ class ChatRequest(BaseModel):
 
 faq_data = []
 GREETINGS = ["hello", "hi", "hey", "greetings", "good morning", "good afternoon", "good evening"]
-qa_cache = {}
 
 @app.on_event("startup")
 async def startup_event():
     global faq_data
-    init_rag()
-    ingest_data()
-    with open('data/faq.json', 'r') as f:
+    # Load FAQ
+    with open("data/faq.json", "r", encoding="utf-8") as f:
         faq_data = json.load(f)
 
+    # Init RAG (expects chroma_db already built)
+    init_rag()
+
 def is_greeting(message: str) -> bool:
-    return message.lower().strip() in GREETINGS
+    return message.strip().lower() in GREETINGS
 
 def get_faq_answer(message: str) -> str | None:
     message_lower = message.lower()
     for item in faq_data:
-        if any(re.search(r'\b' + keyword + r'\b', message_lower) for keyword in item['keywords']):
-            return item['answer']
+        for keyword in item.get("keywords", []):
+            # safer regex (escapes special chars)
+            if re.search(r"\b" + re.escape(keyword) + r"\b", message_lower):
+                return item.get("answer")
     return None
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
 
 @app.post("/chat")
 async def chat(request: ChatRequest) -> Dict:
     try:
-        user_message = request.message.strip()
+        user_message = (request.message or "").strip()
+        if not user_message:
+            raise HTTPException(status_code=400, detail="message is required")
 
-        # 1. Check for greetings
+        # 1) Greetings -> local
         if is_greeting(user_message):
-            return {
-                "answer": "Hello! How can I assist you today?",
-                "sources": [],
-                "context_used": 0
-            }
+            return {"answer": "Hello! How can I assist you today?", "sources": ["local"], "context_used": 0}
 
-        # 2. Check cache for previously answered questions
-        if user_message in qa_cache:
-            return qa_cache[user_message]
-
-        # 3. RAG query for course-related questions
-        docs = query_rag(user_message)
-        if docs:
-            context = "\n".join([doc['text'] for doc in docs])
-            answer = generate_answer(user_message, context)
-            sources = [doc['metadata']['title'] for doc in docs]
-            
-            response = {
-                "answer": answer,
-                "sources": sources,
-                "context_used": len(docs)
-            }
-            
-            # Store the new answer in the cache
-            qa_cache[user_message] = response
-            return response
-
-        # 4. Check for FAQ
+        # 2) FAQ -> local
         faq_answer = get_faq_answer(user_message)
         if faq_answer:
-            return {
-                "answer": faq_answer,
-                "sources": ["FAQ"],
-                "context_used": 0
-            }
+            return {"answer": faq_answer, "sources": ["FAQ"], "context_used": 0}
 
-        # 5. Fallback response
-        return {
-            "answer": "I can answer questions about our courses and common topics like services, hiring, and pricing. How can I help you with those?",
-            "sources": [],
-            "context_used": 0
-        }
+        # 3) Cache -> exact match
+        cached = get_cached(user_message)
+        if cached:
+            return {"answer": cached, "sources": ["cache"], "context_used": 0}
+
+        # 4) RAG retrieve context from your docs/json
+        context = retrieve_context(user_message, k=3)
+
+        # 5) Titan with context
+        answer = generate_answer(user_message, context=context)
+
+        # 6) Store in cache
+        put_cached(user_message, answer)
+
+        return {"answer": answer, "sources": ["rag", "titan"], "context_used": 1}
+
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/ingest")
-async def ingest():
-    ingest_data()
-    return {"status": "ingested"}
-
-# Mount the frontend directory containing the UI
 
 if __name__ == "__main__":
     import uvicorn

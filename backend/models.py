@@ -2,21 +2,18 @@ import os
 import json
 import boto3
 
-# CHANGE THIS when needed
 USE_BEDROCK = True
-
-MODEL_PROVIDER = "titan"  # "local" or "titan"
-
+MODEL_PROVIDER = "titan"
 TITAN_MODEL_ID = "amazon.titan-text-express-v1"
 
 def generate_answer(prompt: str, context: str) -> str:
     if not USE_BEDROCK:
         return "Bedrock disabled by config"
-    
+
     if MODEL_PROVIDER == "titan":
         return titan_bedrock(prompt, context)
     else:
-        return "Local model disabled"    
+        return "Local model disabled"
 
 def titan_bedrock(prompt: str, context: str) -> str:
     client = boto3.client(
@@ -24,9 +21,13 @@ def titan_bedrock(prompt: str, context: str) -> str:
         region_name=os.getenv("AWS_DEFAULT_REGION", "us-east-1")
     )
 
-    full_prompt = f"""
+    if context and context.strip():
+        full_prompt = f"""
 You are Sidh Guide, a helpful assistant.
-Use ONLY the context below. If the answer is not in the context, say you don't know.
+
+RULES:
+- Answer ONLY using the Context below.
+- If the answer is not clearly in the Context, reply exactly: I don't know.
 
 Context:
 {context}
@@ -34,7 +35,15 @@ Context:
 Question:
 {prompt}
 
-Answer clearly and briefly:
+Answer:
+""".strip()
+    else:
+        full_prompt = f"""
+You are Sidh Guide, a helpful assistant.
+Answer the user clearly and briefly.
+
+User question:
+{prompt}
 """.strip()
 
     body = {
