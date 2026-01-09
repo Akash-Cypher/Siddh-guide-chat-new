@@ -4,7 +4,7 @@ import boto3
 
 USE_BEDROCK = True
 MODEL_PROVIDER = "titan"
-TITAN_MODEL_ID = "amazon.titan-text-express-v1"
+TITAN_MODEL_ID = "nvidia.nemotron-nano-12b-v2"
 
 def generate_answer(prompt: str, context: str) -> str:
     if not USE_BEDROCK:
