@@ -6,7 +6,9 @@ import boto3
 CACHE_TABLE = os.getenv("CACHE_TABLE", "SiddhGuideCache")
 CACHE_TTL_SECONDS = int(os.getenv("CACHE_TTL_SECONDS", "259200"))  # 3 days default
 
-dynamodb = boto3.resource("dynamodb", region_name=os.getenv("AWS_DEFAULT_REGION", "us-east-1"))
+REGION = os.getenv("AWS_DEFAULT_REGION") or os.getenv("AWS_REGION") or "ap-south-1"
+
+dynamodb = boto3.resource("dynamodb", region_name=REGION)
 table = dynamodb.Table(CACHE_TABLE)
 
 def _norm(q: str) -> str:

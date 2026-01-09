@@ -11,10 +11,9 @@ from cache import get_cached, put_cached
 
 app = FastAPI(title="Siddh Guide Chatbot")
 
-# TODO later: replace "*" with your WordPress domain to avoid abuse
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],   # later lock to your wordpress domain
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -30,11 +29,9 @@ GREETINGS = ["hello", "hi", "hey", "greetings", "good morning", "good afternoon"
 @app.on_event("startup")
 async def startup_event():
     global faq_data
-    # Load FAQ
     with open("data/faq.json", "r", encoding="utf-8") as f:
         faq_data = json.load(f)
 
-    # Init RAG (expects chroma_db already built)
     init_rag()
 
 def is_greeting(message: str) -> bool:
@@ -44,7 +41,6 @@ def get_faq_answer(message: str) -> str | None:
     message_lower = message.lower()
     for item in faq_data:
         for keyword in item.get("keywords", []):
-            # safer regex (escapes special chars)
             if re.search(r"\b" + re.escape(keyword) + r"\b", message_lower):
                 return item.get("answer")
     return None
@@ -74,16 +70,17 @@ async def chat(request: ChatRequest) -> Dict:
         if cached:
             return {"answer": cached, "sources": ["cache"], "context_used": 0}
 
-        # 4) RAG retrieve context from your docs/json
+        # 4) RAG retrieve context
         context = retrieve_context(user_message, k=3)
+        context_used = 1 if (context and context.strip()) else 0
 
-        # 5) Titan with context
+        # 5) Nova with context (via generate_answer)
         answer = generate_answer(user_message, context=context)
 
         # 6) Store in cache
         put_cached(user_message, answer)
 
-        return {"answer": answer, "sources": ["rag", "titan"], "context_used": 1}
+        return {"answer": answer, "sources": ["rag", "nova"], "context_used": context_used}
 
     except HTTPException:
         raise

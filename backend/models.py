@@ -1,66 +1,101 @@
 import os
 import json
 import boto3
+from typing import Optional
 
+# -------------------------
+# Config
+# -------------------------
 USE_BEDROCK = True
-MODEL_PROVIDER = "titan"
-TITAN_MODEL_ID = "nvidia.nemotron-nano-12b-v2"
+MODEL_PROVIDER = "nova"
 
+# Amazon Nova Micro (chat/text model)
+NOVA_MODEL_ID = "amazon.nova-micro-v1:0"
+
+
+# -------------------------
+# Public function used by main.py
+# -------------------------
 def generate_answer(prompt: str, context: str) -> str:
+    """
+    Returns an answer from Bedrock (Nova Micro), optionally grounded by context.
+    """
     if not USE_BEDROCK:
         return "Bedrock disabled by config"
 
-    if MODEL_PROVIDER == "titan":
-        return titan_bedrock(prompt, context)
-    else:
-        return "Local model disabled"
+    if MODEL_PROVIDER == "nova":
+        return nova_bedrock(prompt, context)
 
-def titan_bedrock(prompt: str, context: str) -> str:
+    return "Local model disabled"
+
+
+# -------------------------
+# Bedrock - Nova Micro
+# -------------------------
+def nova_bedrock(prompt: str, context: Optional[str] = "") -> str:
+    """
+    Calls Amazon Nova Micro via Bedrock Runtime using a chat-style payload.
+    """
+    region = os.getenv("AWS_DEFAULT_REGION") or os.getenv("AWS_REGION") or "ap-south-1"
+
     client = boto3.client(
         "bedrock-runtime",
-        region_name=os.getenv("AWS_DEFAULT_REGION", "us-east-1")
+        region_name=region
     )
 
+    # System instructions (strict RAG mode when context exists)
     if context and context.strip():
-        full_prompt = f"""
-You are Sidh Guide, a helpful assistant.
-
-RULES:
-- Answer ONLY using the Context below.
-- If the answer is not clearly in the Context, reply exactly: I don't know.
-
-Context:
-{context}
-
-Question:
-{prompt}
-
-Answer:
-""".strip()
+        system_prompt = (
+            "You are Siddh Guide, a helpful assistant.\n\n"
+            "RULES:\n"
+            "- Answer ONLY using the Context below.\n"
+            "- If the answer is not clearly in the Context, reply exactly: I don't know.\n\n"
+            f"Context:\n{context}"
+        )
     else:
-        full_prompt = f"""
-You are Sidh Guide, a helpful assistant.
-Answer the user clearly and briefly.
+        system_prompt = (
+            "You are Siddh Guide, a helpful assistant.\n"
+            "Answer the user clearly and briefly."
+        )
 
-User question:
-{prompt}
-""".strip()
-
+    # Nova chat-style payload (IMPORTANT: no inputText)
     body = {
-        "inputText": full_prompt,
-        "textGenerationConfig": {
-            "maxTokenCount": 300,
-            "temperature": 0.2,
-            "topP": 0.9
-        }
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt}
+        ],
+        "max_tokens": 400,
+        "temperature": 0.2,
+        "top_p": 0.9
     }
 
     response = client.invoke_model(
-        modelId=TITAN_MODEL_ID,
+        modelId=NOVA_MODEL_ID,
         body=json.dumps(body),
         accept="application/json",
         contentType="application/json"
     )
 
     result = json.loads(response["body"].read())
-    return result["results"][0]["outputText"].strip()
+
+    # Try common response shapes safely (Bedrock models can differ slightly)
+    # Most likely shape (what Nova returns in many Bedrock integrations):
+    # { "output": [ { "content": [ { "text": "..." } ] } ] }
+    try:
+        return result["output"][0]["content"][0]["text"].strip()
+    except Exception:
+        pass
+
+    # Fallback shapes (just in case)
+    try:
+        return result["message"]["content"][0]["text"].strip()
+    except Exception:
+        pass
+
+    try:
+        return result["results"][0]["outputText"].strip()
+    except Exception:
+        pass
+
+    # If we can't parse, return raw JSON for debugging (still safe)
+    return json.dumps(result)[:2000]
