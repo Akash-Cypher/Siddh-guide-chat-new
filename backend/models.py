@@ -10,7 +10,7 @@ USE_BEDROCK = True
 MODEL_PROVIDER = "nova"
 
 # Amazon Nova Micro (chat/text model)
-NOVA_MODEL_ID = "amazon.nova-micro-v1:0"
+NOVA_MODEL_ID = "arn:aws:bedrock:ap-south-1:417311687123:inference-profile/apac.amazon.nova-micro-v1:0"
 
 
 # -------------------------
