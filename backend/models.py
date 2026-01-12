@@ -33,17 +33,10 @@ def generate_answer(prompt: str, context: str) -> str:
 # Bedrock - Nova Micro
 # -------------------------
 def nova_bedrock(prompt: str, context: Optional[str] = "") -> str:
-    """
-    Calls Amazon Nova Micro via Bedrock Runtime using a chat-style payload.
-    """
     region = os.getenv("AWS_DEFAULT_REGION") or os.getenv("AWS_REGION") or "ap-south-1"
 
-    client = boto3.client(
-        "bedrock-runtime",
-        region_name=region
-    )
+    client = boto3.client("bedrock-runtime", region_name=region)
 
-    # System instructions (strict RAG mode when context exists)
     if context and context.strip():
         system_prompt = (
             "You are Siddh Guide, a helpful assistant.\n\n"
@@ -58,15 +51,16 @@ def nova_bedrock(prompt: str, context: Optional[str] = "") -> str:
             "Answer the user clearly and briefly."
         )
 
-    # Nova chat-style payload (IMPORTANT: no inputText)
     body = {
         "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": prompt}
+            {"role": "user", "content": [{"text": prompt}]}
         ],
-        "max_tokens": 400,
-        "temperature": 0.2,
-        "top_p": 0.9
+        "system": [{"text": system_prompt}],
+        "inferenceConfig": {
+            "maxTokens": 400,
+            "temperature": 0.2,
+            "topP": 0.9
+        }
     }
 
     response = client.invoke_model(
@@ -78,24 +72,14 @@ def nova_bedrock(prompt: str, context: Optional[str] = "") -> str:
 
     result = json.loads(response["body"].read())
 
-    # Try common response shapes safely (Bedrock models can differ slightly)
-    # Most likely shape (what Nova returns in many Bedrock integrations):
-    # { "output": [ { "content": [ { "text": "..." } ] } ] }
     try:
-        return result["output"][0]["content"][0]["text"].strip()
+        return result["output"]["message"]["content"][0]["text"].strip()
     except Exception:
         pass
 
-    # Fallback shapes (just in case)
     try:
         return result["message"]["content"][0]["text"].strip()
     except Exception:
         pass
 
-    try:
-        return result["results"][0]["outputText"].strip()
-    except Exception:
-        pass
-
-    # If we can't parse, return raw JSON for debugging (still safe)
     return json.dumps(result)[:2000]
