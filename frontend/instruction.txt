@@ -1,0 +1,96 @@
+Siddh Guide Chat Widget – WordPress Integration Instructions
+
+Hi team,
+Sharing the Siddh Guide Chat Widget package.
+Please add it to the landing page (and optionally About Us / Blogs) using the steps below.
+
+1️⃣ Install the Proxy Plugin (Required)
+
+This plugin securely connects WordPress to the AWS chatbot backend.
+
+Create the folder:
+
+wp-content/plugins/siddh-guide-chat-proxy/
+
+
+Place the file inside:
+
+siddh-guide-chat-proxy.php
+
+
+Go to WP Admin → Plugins and activate
+“Siddh Guide Chat Proxy”
+
+2️⃣ Add API Key (Server-Side Only)
+
+In wp-config.php, add the following line:
+
+define('SIDDH_CHAT_API_KEY', '<<API KEY WILL BE SHARED PRIVATELY>>');
+
+
+⚠️ Important:
+
+Do not add this key in JavaScript or HTML
+
+This key must remain server-side only
+
+3️⃣ Upload Frontend Assets
+
+Upload the following files to the active theme:
+
+/wp-content/themes/<active-theme>/assets/siddh-chat/
+
+
+Files to upload:
+
+siddh-guide-chat.js
+
+style.css
+
+Upload siddhanta-logo.png to the Media Library (or uploads folder).
+Please note the final image URL — it will be used in the HTML snippet.
+
+4️⃣ Enqueue CSS and JS
+
+Add the following code to the theme’s functions.php file:
+
+function siddh_guide_chat_assets() {
+  wp_enqueue_style(
+    'siddh-guide-chat-css',
+    get_stylesheet_directory_uri() . '/assets/siddh-chat/style.css',
+    [],
+    '1.0'
+  );
+
+  wp_enqueue_script(
+    'siddh-guide-chat-js',
+    get_stylesheet_directory_uri() . '/assets/siddh-chat/siddh-guide-chat.js',
+    [],
+    '1.0',
+    true
+  );
+}
+add_action('wp_enqueue_scripts', 'siddh_guide_chat_assets');
+
+5️⃣ Paste Widget HTML on the Page
+
+Open the landing page in the WordPress editor
+
+Add a Custom HTML block
+
+Paste the contents of:
+
+siddh-guide-chat-widget.html
+
+
+📌 Update the <img src="..."> path inside the HTML if needed to match the uploaded logo URL.
+
+6️⃣ Test the Integration
+
+Visit the page
+
+Click the chat bubble
+
+Send: “hello”
+
+Confirm a bot response is returned

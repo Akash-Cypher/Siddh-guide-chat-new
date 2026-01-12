@@ -6,6 +6,7 @@ import json
 import re
 import logging
 import os
+import uuid
 
 from models import generate_answer
 from rag import init_rag, retrieve_context
@@ -20,13 +21,20 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("siddh_guide")
 
 # -------------------------
-# CORS (lock to WP domains)
+# Config
 # -------------------------
 ALLOWED_ORIGINS = [
     "https://siddhantaknowledge.org",
     "https://www.siddhantaknowledge.org",
 ]
 
+# Cost + abuse control
+MAX_MESSAGE_CHARS = int(os.getenv("MAX_MESSAGE_CHARS", "600"))  # keep reasonable
+ENFORCE_API_KEY = os.getenv("ENFORCE_API_KEY", "1") == "1"     # default ON
+
+# -------------------------
+# CORS (ok for testing; WP proxy makes this less critical)
+# -------------------------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
@@ -78,14 +86,18 @@ async def chat(
     """
     Main chatbot endpoint:
     greeting -> FAQ -> cache -> RAG -> Bedrock -> cache write
-    Also enforces optional API key auth via CHAT_API_KEY env var.
+
+    API key:
+    - Enforced if ENFORCE_API_KEY=1 and CHAT_API_KEY is set in env (Secrets Manager in App Runner).
     """
+    request_id = str(uuid.uuid4())[:8]
+
     try:
         # -------------------------
-        # API key auth (only enforced if CHAT_API_KEY is set)
+        # API key auth (recommended when using WP proxy)
         # -------------------------
         chat_api_key = os.getenv("CHAT_API_KEY")  # read at runtime
-        if chat_api_key:
+        if ENFORCE_API_KEY and chat_api_key:
             if not x_api_key or x_api_key != chat_api_key:
                 raise HTTPException(status_code=401, detail="Unauthorized")
 
@@ -93,26 +105,49 @@ async def chat(
         if not user_message:
             raise HTTPException(status_code=400, detail="message is required")
 
-        # (Optional) normalize common variant
+        if len(user_message) > MAX_MESSAGE_CHARS:
+            raise HTTPException(
+                status_code=413,
+                detail=f"message too long (max {MAX_MESSAGE_CHARS} chars)"
+            )
+
+        # Optional normalize common variant
         user_message = user_message.replace("knowledgebase", "knowledge base")
 
-        # Log request (keep it light; avoid PII in logs if possible)
+        # Log request (avoid logging full user message)
         origin = req.headers.get("origin", "")
-        logger.info(f"/chat origin={origin} session={request.session_id} msg_len={len(user_message)}")
+        logger.info(
+            f"[{request_id}] /chat origin={origin} session={request.session_id} msg_len={len(user_message)}"
+        )
 
         # 1) Greetings -> local
         if is_greeting(user_message):
-            return {"answer": "Hello! How can I assist you today?", "sources": ["local"], "context_used": 0}
+            return {
+                "answer": "Hello! How can I assist you today?",
+                "sources": ["local"],
+                "context_used": 0,
+                "request_id": request_id
+            }
 
         # 2) FAQ -> local
         faq_answer = get_faq_answer(user_message)
         if faq_answer:
-            return {"answer": faq_answer, "sources": ["FAQ"], "context_used": 0}
+            return {
+                "answer": faq_answer,
+                "sources": ["FAQ"],
+                "context_used": 0,
+                "request_id": request_id
+            }
 
         # 3) Cache -> exact match
         cached = get_cached(user_message)
         if cached:
-            return {"answer": cached, "sources": ["cache"], "context_used": 0}
+            return {
+                "answer": cached,
+                "sources": ["cache"],
+                "context_used": 0,
+                "request_id": request_id
+            }
 
         # 4) RAG retrieve context
         context = retrieve_context(user_message, k=3)
@@ -125,12 +160,17 @@ async def chat(
         if answer and answer.strip().lower() not in ["i don't know.", "i dont know."]:
             put_cached(user_message, answer)
 
-        return {"answer": answer, "sources": ["rag", "nova"], "context_used": context_used}
+        return {
+            "answer": answer,
+            "sources": ["rag", "nova"],
+            "context_used": context_used,
+            "request_id": request_id
+        }
 
     except HTTPException:
         raise
     except Exception:
-        logger.exception("Unhandled error in /chat")
+        logger.exception(f"[{request_id}] Unhandled error in /chat")
         raise HTTPException(status_code=500, detail="Internal error")
 
 if __name__ == "__main__":

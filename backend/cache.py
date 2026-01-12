@@ -28,8 +28,8 @@ def put_cached(q: str, answer: str):
     key = make_key(q)
     ttl = int(time.time()) + CACHE_TTL_SECONDS
     table.put_item(Item={
-        "pk": key,
-        "q": q,
-        "answer": answer,
-        "ttl": ttl
-    })
+    "pk": key,
+    "answer": answer,
+    "ttl": ttl
+})
+
