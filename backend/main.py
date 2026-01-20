@@ -26,7 +26,6 @@ logger = logging.getLogger("siddh_guide")
 ALLOWED_ORIGINS = [
     "https://siddhantaknowledge.org",
     "https://www.siddhantaknowledge.org",
-    "https://siksha.siddhantaknowledge.org",
 ]
 
 # Cost + abuse control
