@@ -137,9 +137,14 @@ def build_index_from_json_folder(json_folder: str = "data"):
     print(f"Ingested {len(ids)} docs into Chroma at {CHROMA_PATH}")
 
 
-def retrieve_context(question: str, k: int = 3) -> str:
+def retrieve_context(
+    question: str,
+    k: int = 3,
+    max_chars: int = 1500,          # total context budget
+    max_chunk_chars: int = 500      # per retrieved doc budget
+) -> str:
     """
-    Returns a context string to feed the LLM.
+    Returns a context string to feed the LLM (size-limited to reduce cost).
     """
     if _collection is None:
         init_rag()
@@ -154,10 +159,33 @@ def retrieve_context(question: str, k: int = 3) -> str:
     metas = results.get("metadatas", [[]])[0]
 
     chunks = []
+    total = 0
+
     for d, m in zip(docs, metas):
+        if not d:
+            continue
+
         src = (m or {}).get("source", "doc")
         title = (m or {}).get("title", "")
         header = f"[source={src}{' | ' + title if title else ''}]"
-        chunks.append(f"{header}\n{d}")
+
+        # clamp each chunk (prevents one giant doc)
+        d = d.strip().replace("\n\n", "\n")
+        if len(d) > max_chunk_chars:
+            d = d[:max_chunk_chars].rsplit(" ", 1)[0] + "…"
+
+        chunk = f"{header}\n{d}"
+
+        # clamp total context (prevents overall bloat)
+        if total + len(chunk) > max_chars:
+            remaining = max_chars - total
+            if remaining <= 0:
+                break
+            chunk = chunk[:remaining].rsplit(" ", 1)[0] + "…"
+            chunks.append(chunk)
+            break
+
+        chunks.append(chunk)
+        total += len(chunk)
 
     return "\n\n---\n\n".join(chunks).strip()

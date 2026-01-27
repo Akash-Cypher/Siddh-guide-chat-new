@@ -39,16 +39,20 @@ def nova_bedrock(prompt: str, context: Optional[str] = "") -> str:
 
     if context and context.strip():
         system_prompt = (
-            "You are Siddh Guide, a helpful assistant.\n\n"
-            "RULES:\n"
-            "- Answer ONLY using the Context below.\n"
-            "- If the answer is not clearly in the Context, reply exactly: I don't know.\n\n"
-            f"Context:\n{context}"
+                            "You are Siddh Guide, a helpful assistant.\n\n"
+                            "RULES:\n"
+                            "- Answer ONLY using the Context below.\n"
+                            "- If the answer is not clearly in the Context, reply exactly: I don't know.\n"
+                            "- Keep the answer short: 1-3 sentences.\n"
+                            "- No long explanations, no extra background, no filler.\n"
+                            "- If recommending courses, list max 3 with short reasons (5-10 words each).\n\n"
+                            f"Context:\n{context}"
         )
     else:
         system_prompt = (
             "You are Siddh Guide, a helpful assistant.\n"
-            "Answer the user clearly and briefly."
+            "Answer the user clearly."
+            "Keep answers short: 1-2 sentences. No filler."
         )
 
     body = {
@@ -57,7 +61,7 @@ def nova_bedrock(prompt: str, context: Optional[str] = "") -> str:
         ],
         "system": [{"text": system_prompt}],
         "inferenceConfig": {
-            "maxTokens": 400,
+            "maxTokens": 100,
             "temperature": 0.2,
             "topP": 0.9
         }

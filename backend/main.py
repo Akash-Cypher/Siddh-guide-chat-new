@@ -51,7 +51,30 @@ class ChatRequest(BaseModel):
     session_id: str = "default"
 
 faq_data = []
-GREETINGS = ["hello", "hi", "hey", "greetings", "good morning", "good afternoon", "good evening"]
+
+GREETINGS = [
+    "hello", "hi", "hey", "greetings",
+    "good morning", "good afternoon", "good evening"
+]
+
+ABOUT_BOT_KEYWORDS = [
+    "who are you",
+    "what are you",
+    "what do you do",
+    "how will you help",
+    "how can you help",
+    "what help can you do",
+    "what can you do",
+    "how will you assist me",
+    "about you",
+    "about siddh guide",
+]
+
+ABOUT_BOT_REPLY = (
+    "I’m Siddh Guide 🤝 — a helpful assistant by Siddhanta Knowledge Foundation. "
+    "I guide you through IKS courses, explain what suits your background, "
+    "and help you choose the right certified programs under the Ministry of Education."
+)
 
 @app.on_event("startup")
 async def startup_event():
@@ -64,6 +87,10 @@ async def startup_event():
 
 def is_greeting(message: str) -> bool:
     return message.strip().lower() in GREETINGS
+
+def is_about_bot(message: str) -> bool:
+    msg = (message or "").strip().lower()
+    return any(k in msg for k in ABOUT_BOT_KEYWORDS)
 
 def get_faq_answer(message: str) -> str | None:
     message_lower = message.lower()
@@ -85,7 +112,7 @@ async def chat(
 ) -> Dict:
     """
     Main chatbot endpoint:
-    greeting -> FAQ -> cache -> RAG -> Bedrock -> cache write
+    greeting -> about bot -> FAQ -> cache -> RAG -> Bedrock -> cache write
 
     API key:
     - Enforced if ENFORCE_API_KEY=1 and CHAT_API_KEY is set in env (Secrets Manager in App Runner).
@@ -129,6 +156,15 @@ async def chat(
                 "request_id": request_id
             }
 
+        # 1.5) About bot -> local (THIS IS THE MISSING PART)
+        if is_about_bot(user_message):
+            return {
+                "answer": ABOUT_BOT_REPLY,
+                "sources": ["local"],
+                "context_used": 0,
+                "request_id": request_id
+            }
+
         # 2) FAQ -> local
         faq_answer = get_faq_answer(user_message)
         if faq_answer:
@@ -149,8 +185,8 @@ async def chat(
                 "request_id": request_id
             }
 
-        # 4) RAG retrieve context
-        context = retrieve_context(user_message, k=3)
+        # 4) RAG retrieve context (clamped for cost + shorter replies)
+        context = retrieve_context(user_message, k=3, max_chars=1500, max_chunk_chars=500)
         context_used = 1 if (context and context.strip()) else 0
 
         # 5) Nova with context
