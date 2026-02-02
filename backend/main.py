@@ -1,16 +1,19 @@
-from fastapi import FastAPI, HTTPException, Header, Request
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import Dict
+from __future__ import annotations
+
 import json
-import re
 import logging
 import os
+import re
 import uuid
+from typing import Dict, Optional
 
+from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+
+from cache import get_cached, put_cached
 from models import generate_answer
 from rag import init_rag, retrieve_context
-from cache import get_cached, put_cached
 
 # -------------------------
 # App + Logging
@@ -28,12 +31,11 @@ ALLOWED_ORIGINS = [
     "https://www.siddhantaknowledge.org",
 ]
 
-# Cost + abuse control
-MAX_MESSAGE_CHARS = int(os.getenv("MAX_MESSAGE_CHARS", "600"))  # keep reasonable
-ENFORCE_API_KEY = os.getenv("ENFORCE_API_KEY", "1") == "1"     # default ON
+MAX_MESSAGE_CHARS = int(os.getenv("MAX_MESSAGE_CHARS", "600"))
+ENFORCE_API_KEY = os.getenv("ENFORCE_API_KEY", "1") == "1"
 
 # -------------------------
-# CORS (ok for testing; WP proxy makes this less critical)
+# CORS
 # -------------------------
 app.add_middleware(
     CORSMiddleware,
@@ -50,12 +52,18 @@ class ChatRequest(BaseModel):
     message: str
     session_id: str = "default"
 
-faq_data = []
 
-GREETINGS = [
-    "hello", "hi", "hey", "greetings",
-    "good morning", "good afternoon", "good evening"
-]
+faq_data: list[dict] = []
+
+GREETINGS = {
+    "hello",
+    "hi",
+    "hey",
+    "greetings",
+    "good morning",
+    "good afternoon",
+    "good evening",
+}
 
 ABOUT_BOT_KEYWORDS = [
     "who are you",
@@ -72,9 +80,10 @@ ABOUT_BOT_KEYWORDS = [
 
 ABOUT_BOT_REPLY = (
     "I’m Siddh Guide 🤝 — a helpful assistant by Siddhanta Knowledge Foundation. "
-    "I guide you through IKS courses, explain what suits your background, "
-    "and help you choose the right certified programs under the Ministry of Education."
+    "I can help you explore IKS courses, suggest what fits your interests, "
+    "and guide you to the right certified programs."
 )
+
 
 @app.on_event("startup")
 async def startup_event():
@@ -85,24 +94,63 @@ async def startup_event():
     init_rag()
     logger.info("Startup complete: FAQ loaded + RAG initialized")
 
+
+def _norm(text: str) -> str:
+    return " ".join((text or "").strip().split())
+
+
 def is_greeting(message: str) -> bool:
-    return message.strip().lower() in GREETINGS
+    return _norm(message).lower() in GREETINGS
+
 
 def is_about_bot(message: str) -> bool:
-    msg = (message or "").strip().lower()
+    msg = _norm(message).lower()
     return any(k in msg for k in ABOUT_BOT_KEYWORDS)
 
-def get_faq_answer(message: str) -> str | None:
-    message_lower = message.lower()
+
+def get_faq_answer(message: str) -> Optional[str]:
+    """
+    Matches:
+    - multi-word keywords via substring (e.g. 'siddhanta knowledge foundation')
+    - single-word keywords via word-boundary regex
+    """
+    message_lower = (message or "").lower()
+
     for item in faq_data:
         for keyword in item.get("keywords", []):
-            if re.search(r"\b" + re.escape(keyword) + r"\b", message_lower):
+            kw = (keyword or "").strip().lower()
+            if not kw:
+                continue
+
+            # multi-word phrase: simple substring match
+            if " " in kw:
+                if kw in message_lower:
+                    return item.get("answer")
+                continue
+
+            # single word: word boundary match
+            if re.search(r"\b" + re.escape(kw) + r"\b", message_lower):
                 return item.get("answer")
+
     return None
+
+
+def _should_cache(answer: str) -> bool:
+    """
+    Don't cache fallback answers (or variations that start with it).
+    """
+    ans = (answer or "").strip().lower()
+    if not ans:
+        return False
+    if ans.startswith("i don't know") or ans.startswith("i dont know"):
+        return False
+    return True
+
 
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
 
 @app.post("/chat")
 async def chat(
@@ -111,37 +159,33 @@ async def chat(
     x_api_key: str | None = Header(default=None, alias="x-api-key"),
 ) -> Dict:
     """
-    Main chatbot endpoint:
+    Flow:
     greeting -> about bot -> FAQ -> cache -> RAG -> Bedrock -> cache write
-
-    API key:
-    - Enforced if ENFORCE_API_KEY=1 and CHAT_API_KEY is set in env (Secrets Manager in App Runner).
     """
     request_id = str(uuid.uuid4())[:8]
 
     try:
         # -------------------------
-        # API key auth (recommended when using WP proxy)
+        # API key auth
         # -------------------------
         chat_api_key = os.getenv("CHAT_API_KEY")  # read at runtime
         if ENFORCE_API_KEY and chat_api_key:
             if not x_api_key or x_api_key != chat_api_key:
                 raise HTTPException(status_code=401, detail="Unauthorized")
 
-        user_message = (request.message or "").strip()
+        user_message = _norm(request.message)
         if not user_message:
             raise HTTPException(status_code=400, detail="message is required")
 
         if len(user_message) > MAX_MESSAGE_CHARS:
             raise HTTPException(
                 status_code=413,
-                detail=f"message too long (max {MAX_MESSAGE_CHARS} chars)"
+                detail=f"message too long (max {MAX_MESSAGE_CHARS} chars)",
             )
 
-        # Optional normalize common variant
+        # normalize common variant
         user_message = user_message.replace("knowledgebase", "knowledge base")
 
-        # Log request (avoid logging full user message)
         origin = req.headers.get("origin", "")
         logger.info(
             f"[{request_id}] /chat origin={origin} session={request.session_id} msg_len={len(user_message)}"
@@ -153,16 +197,16 @@ async def chat(
                 "answer": "Hello! How can I assist you today?",
                 "sources": ["local"],
                 "context_used": 0,
-                "request_id": request_id
+                "request_id": request_id,
             }
 
-        # 1.5) About bot -> local (THIS IS THE MISSING PART)
+        # 1.5) About bot -> local
         if is_about_bot(user_message):
             return {
                 "answer": ABOUT_BOT_REPLY,
                 "sources": ["local"],
                 "context_used": 0,
-                "request_id": request_id
+                "request_id": request_id,
             }
 
         # 2) FAQ -> local
@@ -172,7 +216,7 @@ async def chat(
                 "answer": faq_answer,
                 "sources": ["FAQ"],
                 "context_used": 0,
-                "request_id": request_id
+                "request_id": request_id,
             }
 
         # 3) Cache -> exact match
@@ -182,25 +226,30 @@ async def chat(
                 "answer": cached,
                 "sources": ["cache"],
                 "context_used": 0,
-                "request_id": request_id
+                "request_id": request_id,
             }
 
-        # 4) RAG retrieve context (clamped for cost + shorter replies)
-        context = retrieve_context(user_message, k=3, max_chars=1500, max_chunk_chars=500)
+        # 4) RAG retrieve context (clamped)
+        context = retrieve_context(
+            user_message,
+            k=3,
+            max_chars=1500,
+            max_chunk_chars=500,
+        )
         context_used = 1 if (context and context.strip()) else 0
 
-        # 5) Nova with context
+        # 5) Bedrock/Nova with context
         answer = generate_answer(user_message, context=context)
 
-        # 6) Store in cache (skip useless answers)
-        if answer and answer.strip().lower() not in ["i don't know.", "i dont know."]:
+        # 6) Store in cache (skip fallback answers)
+        if _should_cache(answer):
             put_cached(user_message, answer)
 
         return {
             "answer": answer,
             "sources": ["rag", "nova"],
             "context_used": context_used,
-            "request_id": request_id
+            "request_id": request_id,
         }
 
     except HTTPException:
@@ -209,6 +258,8 @@ async def chat(
         logger.exception(f"[{request_id}] Unhandled error in /chat")
         raise HTTPException(status_code=500, detail="Internal error")
 
+
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=8000)
