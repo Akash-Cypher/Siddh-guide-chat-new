@@ -84,6 +84,105 @@ ABOUT_BOT_REPLY = (
     "and guide you to the right certified programs."
 )
 
+# -------------------------
+# NEW: Capability intent (local reply)
+# -------------------------
+CAPABILITY_KEYWORDS = [
+    "what can you do",
+    "what can you help",
+    "how can you help",
+    "what do you help with",
+    "what help can you do",
+    "how will you assist",
+    "what can you assist",
+    "what can you help us",
+]
+
+CAPABILITY_REPLY = (
+    "I can help you choose the right IKS-certified courses based on your background, "
+    "explain course topics simply, and guide you on eligibility and learning paths. "
+    "Tell me your field (like law, education, management) and your goal."
+)
+
+# -------------------------
+# Anti “I don’t know” guardrail
+# -------------------------
+IDK_LINE_RE = re.compile(
+    r"^\s*i\s*(do\s*not|don't|dont)\s*know\s*[\.\!\?]*\s*$",
+    re.IGNORECASE,
+)
+
+IDK_CONTAINS_RE = re.compile(
+    r"\b(i\s*(do\s*not|don't|dont)\s*know)\b",
+    re.IGNORECASE,
+)
+
+def _looks_like_idk(answer: str) -> bool:
+    """
+    Catch standalone and low-effort answers that ruin UX.
+    """
+    if not answer:
+        return True
+
+    a = answer.strip()
+    if IDK_LINE_RE.match(a):
+        return True
+
+    # If model includes it inside a sentence, we still treat it as bad.
+    if IDK_CONTAINS_RE.search(a):
+        return True
+
+    # Super short replies often mean it failed.
+    if len(a) < 6:
+        return True
+
+    return False
+
+
+def _fallback_reply(user_message: str, context: str) -> str:
+    """
+    Fallback that never says "I don't know" and moves the conversation forward.
+    If context exists, try to suggest up to 3 course-like lines from context.
+    """
+    msg = (user_message or "").strip().lower()
+
+    # If we have context, try extracting up to 3 "course-ish" items
+    suggestions: list[str] = []
+    if context and context.strip():
+        lines = [ln.strip() for ln in context.splitlines() if ln.strip()]
+        for ln in lines:
+            if ln.startswith("[source="):
+                continue
+            # Heuristic: course lines often contain these keywords or look like titles
+            if any(k in ln.lower() for k in ["course", "law", "jurisprudence", "governance", "philosophy", "ethics", "iks"]):
+                clean = ln
+                if len(clean) > 90:
+                    clean = clean[:90].rsplit(" ", 1)[0] + "…"
+                suggestions.append(clean)
+            if len(suggestions) >= 3:
+                break
+
+    if suggestions:
+        bullets = "\n".join([f"- {s}" for s in suggestions[:3]])
+        return (
+            "I don’t have that exact detail in the current course data I’m using. "
+            "Here are a few relevant options I can suggest:\n"
+            f"{bullets}\n"
+            "What’s your goal—practice, judiciary prep, or research?"
+        )
+
+    # No context or no usable suggestions
+    if "law" in msg or "llb" in msg or "juris" in msg:
+        return (
+            "I don’t have that specific detail in my current course list yet. "
+            "Are you looking for law-focused IKS, legal philosophy, or governance/ethics?"
+        )
+
+    return (
+        "I don’t have that in my current course list yet. "
+        "What are you trying to find—course recommendations, eligibility, or syllabus details?"
+    )
+
 
 @app.on_event("startup")
 async def startup_event():
@@ -106,6 +205,14 @@ def is_greeting(message: str) -> bool:
 def is_about_bot(message: str) -> bool:
     msg = _norm(message).lower()
     return any(k in msg for k in ABOUT_BOT_KEYWORDS)
+
+
+# -------------------------
+# NEW: capability checker
+# -------------------------
+def is_capability_question(message: str) -> bool:
+    msg = _norm(message).lower()
+    return any(k in msg for k in CAPABILITY_KEYWORDS)
 
 
 def get_faq_answer(message: str) -> Optional[str]:
@@ -137,13 +244,20 @@ def get_faq_answer(message: str) -> Optional[str]:
 
 def _should_cache(answer: str) -> bool:
     """
-    Don't cache fallback answers (or variations that start with it).
+    Don't cache fallback / refusal-ish / low-signal answers.
     """
     ans = (answer or "").strip().lower()
     if not ans:
         return False
-    if ans.startswith("i don't know") or ans.startswith("i dont know"):
+
+    # block "i don't know" variants
+    if IDK_CONTAINS_RE.search(ans):
         return False
+
+    # block our own fallback style too (so cache doesn’t become generic)
+    if "i don’t have that" in ans or "i don't have that" in ans:
+        return False
+
     return True
 
 
@@ -209,6 +323,15 @@ async def chat(
                 "request_id": request_id,
             }
 
+        # 1.6) Capability -> local (NEW)
+        if is_capability_question(user_message):
+            return {
+                "answer": CAPABILITY_REPLY,
+                "sources": ["local"],
+                "context_used": 0,
+                "request_id": request_id,
+            }
+
         # 2) FAQ -> local
         faq_answer = get_faq_answer(user_message)
         if faq_answer:
@@ -240,6 +363,10 @@ async def chat(
 
         # 5) Bedrock/Nova with context
         answer = generate_answer(user_message, context=context)
+
+        # 5.5) Guardrail: block "I don't know" outputs
+        if _looks_like_idk(answer):
+            answer = _fallback_reply(user_message, context)
 
         # 6) Store in cache (skip fallback answers)
         if _should_cache(answer):
