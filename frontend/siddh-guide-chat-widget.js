@@ -2,9 +2,20 @@ document.addEventListener('DOMContentLoaded', () => {
   // -------------------------------------------------------------------------
   // Configuration (WordPress Proxy)
   // -------------------------------------------------------------------------
-  // This calls WordPress REST API endpoint (same domain). WP server forwards to AWS.
   const API_BASE = "/wp-json/siddh/v1";
-  const SESSION_ID = "default";
+
+  // Persist session across refresh/hard refresh
+  const STORAGE_KEY = "siddh_session_id";
+  let SESSION_ID = localStorage.getItem(STORAGE_KEY);
+
+  if (!SESSION_ID) {
+    if (window.crypto && crypto.randomUUID) {
+      SESSION_ID = crypto.randomUUID();
+    } else {
+      SESSION_ID = "sess_" + Math.random().toString(36).slice(2) + Date.now();
+    }
+    localStorage.setItem(STORAGE_KEY, SESSION_ID);
+  }
   // -------------------------------------------------------------------------
 
   const chatToggleButton = document.getElementById('chatToggleButton');
@@ -45,11 +56,14 @@ document.addEventListener('DOMContentLoaded', () => {
     proactiveMessage.classList.remove('visible');
   }
 
-  chatToggleButton.addEventListener('click', () => {
+  chatToggleButton.addEventListener('click', async () => {
     const isVisible = chatWindow.classList.toggle('visible');
     if (isVisible) {
       stopProactiveMessaging();
       userInput.focus();
+
+      // Load history only when opening chat (less noise)
+      await loadHistory();
     } else {
       startProactiveMessaging();
     }
@@ -72,6 +86,38 @@ document.addEventListener('DOMContentLoaded', () => {
     chatMessages.appendChild(messageElement);
     chatMessages.scrollTop = chatMessages.scrollHeight;
     return messageElement;
+  }
+
+  function clearMessages() {
+    chatMessages.innerHTML = '';
+  }
+
+  async function loadHistory() {
+    try {
+      const response = await fetch(`${API_BASE}/history/${encodeURIComponent(SESSION_ID)}`, {
+        method: 'GET',
+        headers: { 'Accept': 'application/json' }
+      });
+
+      if (!response.ok) return;
+
+      const data = await response.json();
+      const msgs = data.messages || [];
+
+      // Rebuild UI from stored chat
+      clearMessages();
+      for (const m of msgs) {
+        const role = (m.role || "").toLowerCase();
+        const text = (m.text || "").trim();
+        if (!text) continue;
+
+        if (role === "user") addMessage(text, "user");
+        else addMessage(text, "bot");
+      }
+
+    } catch (err) {
+      console.warn("History load failed:", err);
+    }
   }
 
   async function fetchBotResponse(userMessage) {
