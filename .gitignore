@@ -1,35 +1,42 @@
-# Byte-compiled / optimized / DLL files
+# Byte-compiled
 __pycache__/
 *.py[cod]
 *.pyd
 
-# Distribution / packaging
-build/
-dist/
-*.egg-info/
-sdist/
-wheels/
-
-# Environments
+# Virtual env
 venv/
 .venv/
+env/
 .env*
 /backend/venv/
 
-# Database
+# Build artifacts
+build/
+dist/
+*.egg-info/
+wheels/
+sdist/
+
+# Chroma index (never commit)
 chroma_db/
 /backend/chroma_db/
 
-# IDE specific
+# Logs
+*.log
+
+# IDE
 .vscode/
 .idea/
+.DS_Store
+Thumbs.db
 
-# Temp files
-*.log
+# Temp
 *.tmp
 *.swp
 *.bak
 
-# Specific files to ignore
-code updates and ci-cd cmd to aws.txt
+# Project-specific junk
 frontend.zip
+frontend (2).zip
+frontend/
+code updates and ci-cd cmd to aws.txt

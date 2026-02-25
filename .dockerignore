@@ -2,21 +2,32 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+
 .Python
-env/
+.env
+.git
+.gitignore
+
 venv/
 .venv/
-.env
-.git/
-.gitignore
+env/
+
 .DS_Store
 Thumbs.db
+
 .vscode/
 .idea/
+
 dist/
 build/
 *.egg-info/
+
 chroma_db/
-code updates and ci-cd cmd to aws.txt
+
+# Ignore frontend assets
 frontend/
-frontend.zip/
+frontend.zip
+frontend (2).zip
+
+# Random docs
+code updates and ci-cd cmd to aws.txt
