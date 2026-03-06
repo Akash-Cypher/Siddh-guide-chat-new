@@ -3,5 +3,4 @@ uvicorn
 boto3
 pydantic
 chromadb
-sentence-transformers
 posthog<6
