@@ -1,19 +1,22 @@
-import os
 import json
-from typing import Optional, List
+import logging
+import os
+from typing import Dict, List, Optional
 
 import boto3
 import chromadb
 from chromadb.config import Settings
 
-CHROMA_PATH = os.getenv("CHROMA_PATH", "./chroma_db")
-COLLECTION_NAME = os.getenv("CHROMA_COLLECTION", "sidh_guide")
+from config import (
+    AWS_BOTO_CONFIG,
+    AWS_REGION,
+    BEDROCK_EMBED_MODEL_ID,
+    CHROMA_COLLECTION,
+    CHROMA_PATH,
+    RAG_MAX_DISTANCE,
+)
 
-# Bedrock embedding model (set via env)
-# Good default for Bedrock embeddings:
-# amazon.titan-embed-text-v2:0 (recommended) OR amazon.titan-embed-text-v1
-BEDROCK_EMBED_MODEL_ID = os.getenv("BEDROCK_EMBED_MODEL_ID", "amazon.titan-embed-text-v2:0")
-BEDROCK_REGION = os.getenv("AWS_DEFAULT_REGION") or os.getenv("AWS_REGION") or "ap-south-1"
+logger = logging.getLogger("siddh_guide.rag")
 
 _client = None
 _collection = None
@@ -23,14 +26,29 @@ _bedrock = None
 def _get_bedrock():
     global _bedrock
     if _bedrock is None:
-        _bedrock = boto3.client("bedrock-runtime", region_name=BEDROCK_REGION)
+        _bedrock = boto3.client("bedrock-runtime", region_name=AWS_REGION, config=AWS_BOTO_CONFIG)
     return _bedrock
 
 
+def _get_collection():
+    global _client, _collection
+    if _collection is None:
+        _client = chromadb.PersistentClient(
+            path=CHROMA_PATH,
+            settings=Settings(anonymized_telemetry=False),
+        )
+        _collection = _client.get_or_create_collection(
+            name=CHROMA_COLLECTION,
+            metadata={"hnsw:space": "cosine"},
+        )
+    return _collection
+
+
+def init_rag() -> None:
+    _get_collection()
+
+
 def _embed_texts(texts: List[str]) -> List[List[float]]:
-    """
-    Create embeddings using Bedrock Titan Embeddings.
-    """
     br = _get_bedrock()
     vectors: List[List[float]] = []
 
@@ -40,7 +58,6 @@ def _embed_texts(texts: List[str]) -> List[List[float]]:
             vectors.append([])
             continue
 
-        # Titan v2 expects "inputText"
         body = {"inputText": t}
 
         resp = br.invoke_model(
@@ -51,14 +68,7 @@ def _embed_texts(texts: List[str]) -> List[List[float]]:
         )
 
         payload = json.loads(resp["body"].read())
-
-        # Titan embedding response keys can differ by model version
-        # v2: {"embedding": [...]}
-        # v1: {"embedding": [...]}
-        emb = payload.get("embedding")
-        if not emb:
-            # fallback keys (rare)
-            emb = payload.get("vector") or payload.get("embeddings")
+        emb = payload.get("embedding") or payload.get("vector") or payload.get("embeddings")
 
         if not emb:
             raise RuntimeError(f"Bedrock embedding failed: {payload}")
@@ -68,35 +78,21 @@ def _embed_texts(texts: List[str]) -> List[List[float]]:
     return vectors
 
 
-def init_rag():
-    global _client, _collection
-
-    _client = chromadb.PersistentClient(
-        path=CHROMA_PATH,
-        settings=Settings(anonymized_telemetry=False)
-    )
-
-    # IMPORTANT: do NOT pass embedding_function to collection.
-    # We will manually provide embeddings on add/query.
-    _collection = _client.get_or_create_collection(name=COLLECTION_NAME)
-
-
 def _make_unique_id(filename: str, raw_id: Optional[str], i: int) -> str:
     file_key = os.path.basename(filename).replace(" ", "_")
     base = (raw_id or "").strip() or "row"
     return f"{file_key}::{base}::{i}"
 
 
-def build_index_from_json_folder(json_folder: str = "data"):
-    init_rag()
+def build_index_from_json_folder(json_folder: str = "data") -> None:
+    collection = _get_collection()
 
-    # Clear existing docs
     try:
-        existing = _collection.get(include=[])
+        existing = collection.get(include=[])
         if existing and existing.get("ids"):
-            _collection.delete(ids=existing["ids"])
+            collection.delete(ids=existing["ids"])
     except Exception:
-        pass
+        logger.exception("failed clearing existing collection before re-index")
 
     docs = []
     used_ids = set()
@@ -112,96 +108,123 @@ def build_index_from_json_folder(json_folder: str = "data"):
         if isinstance(data, list):
             for i, item in enumerate(data):
                 if isinstance(item, dict):
-                    content = (
-                        item.get("content")
-                        or item.get("answer")
-                        or json.dumps(item, ensure_ascii=False)
-                    )
+                    content = item.get("content") or item.get("answer") or json.dumps(item, ensure_ascii=False)
                     raw_id = item.get("id")
-                    title = item.get("title", "") or ""
+                    title = (item.get("title") or "").strip()
                 else:
                     content = json.dumps(item, ensure_ascii=False)
                     raw_id = None
                     title = ""
 
                 doc_id = _make_unique_id(filename, raw_id, i)
-
                 bump = i
                 while doc_id in used_ids:
                     bump += 1
                     doc_id = _make_unique_id(filename, raw_id, bump)
 
                 used_ids.add(doc_id)
-
                 meta = {"source": filename, "raw_id": raw_id or "", "title": title}
                 docs.append((doc_id, content, meta))
 
         elif isinstance(data, dict):
             content = json.dumps(data, ensure_ascii=False)
             raw_id = data.get("id") if isinstance(data.get("id"), str) else None
+            title = (data.get("title") or "").strip()
             doc_id = _make_unique_id(filename, raw_id, 0)
 
-            if doc_id in used_ids:
-                bump = 1
-                while doc_id in used_ids:
-                    doc_id = _make_unique_id(filename, raw_id, bump)
-                    bump += 1
+            bump = 1
+            while doc_id in used_ids:
+                doc_id = _make_unique_id(filename, raw_id, bump)
+                bump += 1
 
             used_ids.add(doc_id)
-            meta = {"source": filename, "raw_id": raw_id or "", "title": data.get("title", "") or ""}
+            meta = {"source": filename, "raw_id": raw_id or "", "title": title}
             docs.append((doc_id, content, meta))
 
     if not docs:
-        print("No JSON docs found to ingest.")
+        logger.warning("No JSON docs found to ingest from %s", json_folder)
         return
 
     ids = [d[0] for d in docs]
     documents = [d[1] for d in docs]
     metadatas = [d[2] for d in docs]
 
-    # Embed all documents (batching optional; keep simple first)
     embeddings = _embed_texts(documents)
 
-    _collection.add(ids=ids, documents=documents, metadatas=metadatas, embeddings=embeddings)
-    print(f"Ingested {len(ids)} docs into Chroma at {CHROMA_PATH}")
+    collection.add(ids=ids, documents=documents, metadatas=metadatas, embeddings=embeddings)
+    logger.info("Ingested %s docs into Chroma at %s", len(ids), CHROMA_PATH)
+
+
+def retrieve_hits(
+    question: str,
+    k: int = 3,
+    max_distance: float = RAG_MAX_DISTANCE,
+) -> List[Dict]:
+    question = (question or "").strip()
+    if not question:
+        return []
+
+    collection = _get_collection()
+    q_emb = _embed_texts([question])[0]
+
+    results = collection.query(
+        query_embeddings=[q_emb],
+        n_results=max(1, k),
+        include=["documents", "metadatas", "distances"],
+    )
+
+    docs = results.get("documents", [[]])[0]
+    metas = results.get("metadatas", [[]])[0]
+    distances = results.get("distances", [[]])[0]
+
+    hits: List[Dict] = []
+
+    for doc, meta, dist in zip(docs, metas, distances):
+        if not doc:
+            continue
+
+        distance = float(dist) if dist is not None else 999.0
+        if distance > max_distance:
+            continue
+
+        meta = meta or {}
+        hits.append(
+            {
+                "document": doc.strip(),
+                "source": meta.get("source", "doc"),
+                "title": (meta.get("title") or "").strip(),
+                "raw_id": meta.get("raw_id", ""),
+                "distance": distance,
+            }
+        )
+
+    return hits
 
 
 def retrieve_context(
     question: str,
     k: int = 3,
     max_chars: int = 1500,
-    max_chunk_chars: int = 500
+    max_chunk_chars: int = 500,
 ) -> str:
-    if _collection is None:
-        init_rag()
-
-    q_emb = _embed_texts([question])[0]
-
-    results = _collection.query(
-        query_embeddings=[q_emb],
-        n_results=k,
-        include=["documents", "metadatas"]
-    )
-
-    docs = results.get("documents", [[]])[0]
-    metas = results.get("metadatas", [[]])[0]
+    hits = retrieve_hits(question=question, k=k)
+    if not hits:
+        return ""
 
     chunks = []
     total = 0
 
-    for d, m in zip(docs, metas):
-        if not d:
-            continue
+    for hit in hits:
+        src = hit["source"]
+        title = hit["title"]
+        doc = hit["document"]
 
-        src = (m or {}).get("source", "doc")
-        title = (m or {}).get("title", "")
         header = f"[source={src}{' | ' + title if title else ''}]"
 
-        d = d.strip().replace("\n\n", "\n")
-        if len(d) > max_chunk_chars:
-            d = d[:max_chunk_chars].rsplit(" ", 1)[0] + "…"
+        if len(doc) > max_chunk_chars:
+            doc = doc[:max_chunk_chars].rsplit(" ", 1)[0] + "…"
 
-        chunk = f"{header}\n{d}"
+        chunk = f"{header}\n{doc}"
 
         if total + len(chunk) > max_chars:
             remaining = max_chars - total
