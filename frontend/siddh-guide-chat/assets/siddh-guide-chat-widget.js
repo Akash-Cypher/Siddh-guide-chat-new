@@ -1,17 +1,15 @@
 document.addEventListener('DOMContentLoaded', () => {
+  // For the live WordPress site, API_BASE must point to the proxy endpoint.
   const API_BASE = '/wp-json/siddh/v1';
-  const STORAGE_KEY = 'siddh_session_id';
 
-  let SESSION_ID = localStorage.getItem(STORAGE_KEY);
-
-  if (!SESSION_ID) {
+  function generateSessionId() {
     if (window.crypto && typeof window.crypto.randomUUID === 'function') {
-      SESSION_ID = window.crypto.randomUUID();
-    } else {
-      SESSION_ID = 'sess_' + Math.random().toString(36).slice(2) + Date.now();
+      return window.crypto.randomUUID();
     }
-    localStorage.setItem(STORAGE_KEY, SESSION_ID);
+    return 'sess_' + Math.random().toString(36).slice(2) + Date.now();
   }
+
+  let SESSION_ID = generateSessionId();
 
   const chatToggleButton = document.getElementById('chatToggleButton');
   const chatWindow = document.getElementById('chatWindow');
@@ -33,7 +31,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
   let proactiveIndex = 0;
   let proactiveInterval = null;
-  let historyLoaded = false;
 
   function addMessage(text, sender) {
     const messageElement = document.createElement('div');
@@ -46,6 +43,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function clearMessages() {
     chatMessages.innerHTML = '';
+  }
+
+  function resetChatSession() {
+    clearMessages();
+    SESSION_ID = generateSessionId();
   }
 
   function showProactiveMessage() {
@@ -73,44 +75,10 @@ document.addEventListener('DOMContentLoaded', () => {
     proactiveMessage.classList.remove('visible');
   }
 
-  async function loadHistory() {
-    try {
-      const response = await fetch(`${API_BASE}/history/${encodeURIComponent(SESSION_ID)}`, {
-        method: 'GET',
-        headers: {
-          Accept: 'application/json'
-        }
-      });
-
-      if (!response.ok) {
-        return;
-      }
-
-      const data = await response.json();
-      const msgs = Array.isArray(data.messages) ? data.messages : [];
-
-      clearMessages();
-
-      for (const m of msgs) {
-        const role = (m.role || '').toLowerCase();
-        const text = (m.text || '').trim();
-        if (!text) continue;
-
-        if (role === 'user') {
-          addMessage(text, 'user');
-        } else if (role === 'assistant') {
-          addMessage(text, 'bot');
-        }
-      }
-    } catch (err) {
-      console.warn('History load failed:', err);
-    }
-  }
-
   function typewriterEffect(element, text) {
     let i = 0;
     element.textContent = '';
-    const speed = 20;
+    const speed = 8;
 
     function type() {
       if (i < text.length) {
@@ -165,18 +133,14 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  chatToggleButton.addEventListener('click', async () => {
+  chatToggleButton.addEventListener('click', () => {
     const isVisible = chatWindow.classList.toggle('visible');
 
     if (isVisible) {
       stopProactiveMessaging();
       userInput.focus();
-
-      if (!historyLoaded) {
-        await loadHistory();
-        historyLoaded = true;
-      }
     } else {
+      resetChatSession();
       startProactiveMessaging();
     }
   });

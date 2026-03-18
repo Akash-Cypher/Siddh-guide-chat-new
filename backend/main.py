@@ -3,12 +3,15 @@ from __future__ import annotations
 import json
 import logging
 import re
+import os
 import uuid
 from contextlib import asynccontextmanager
-from typing import Dict, Optional
+from pathlib import Path
+from typing import Dict, List, Optional
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from cache import get_cached, put_cached
@@ -40,6 +43,7 @@ logging.basicConfig(
 logger = logging.getLogger("siddh_guide")
 
 faq_data: list[dict] = []
+COURSE_DATA: list[dict] = []  # Direct course list access
 
 SESSION_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,100}$")
 
@@ -59,7 +63,7 @@ ABOUT_BOT_KEYWORDS = [
 ]
 
 ABOUT_BOT_REPLY = (
-    "I’m Siddh Guide — a helpful assistant by Siddhanta Knowledge Foundation. "
+    "I'm Siddh Guide — a helpful assistant by Siddhanta Knowledge Foundation. "
     "I can help you explore IKS courses, suggest what fits your interests, "
     "and guide you to the right certified programs."
 )
@@ -116,23 +120,35 @@ COURSE_LIST_PHRASES = [
     "tell me courses",
 ]
 
-
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=MAX_MESSAGE_CHARS)
     session_id: str = Field(..., min_length=1, max_length=SESSION_ID_MAX_LEN)
 
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global faq_data
-
+    global faq_data, COURSE_DATA
+    
+    # Load FAQ
     with FAQ_PATH.open("r", encoding="utf-8") as f:
         faq_data = json.load(f)
-
+    
+    # Load courses.json if exists
+    courses_path = FAQ_PATH.parent / "courses.json"
+    if courses_path.exists():
+        try:
+            with courses_path.open("r", encoding="utf-8") as f:
+                COURSE_DATA = json.load(f)
+            logger.info(f"Loaded {len(COURSE_DATA)} courses from courses.json")
+        except Exception as e:
+            logger.error(f"Failed to load courses.json: {e}")
+            COURSE_DATA = []
+    else:
+        logger.warning("courses.json not found in /data/")
+        COURSE_DATA = []
+    
     init_rag()
-    logger.info("Startup complete: FAQ loaded + RAG initialized")
+    logger.info("Startup complete: FAQ loaded + RAG initialized + Courses loaded")
     yield
-
 
 app = FastAPI(title=APP_TITLE, lifespan=lifespan)
 
@@ -144,10 +160,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 def _norm(text: str) -> str:
     return " ".join((text or "").strip().split())
-
 
 def _check_api_key(x_api_key: Optional[str]) -> None:
     if not ENFORCE_API_KEY:
@@ -159,7 +173,6 @@ def _check_api_key(x_api_key: Optional[str]) -> None:
 
     if x_api_key != CHAT_API_KEY:
         raise HTTPException(status_code=401, detail="Unauthorized")
-
 
 def _validate_session_id(session_id: str) -> str:
     sid = _norm(session_id)
@@ -181,7 +194,6 @@ def _validate_session_id(session_id: str) -> str:
 
     return sid
 
-
 def _looks_like_followup(message: str) -> bool:
     msg = _norm(message).lower()
 
@@ -196,27 +208,26 @@ def _looks_like_followup(message: str) -> bool:
 
     return False
 
+def is_course_list_intent(message: str) -> bool:
+    """Check if user wants complete course list"""
+    msg = _norm(message).lower()
+    return any(phrase in msg for phrase in COURSE_LIST_PHRASES)
 
 def is_course_intent(message: str) -> bool:
+    """Check for general course-related queries"""
     msg = _norm(message).lower()
-    if any(p in msg for p in COURSE_LIST_PHRASES):
-        return True
-    return bool(COURSE_INTENT_RE.search(msg))
-
+    return bool(COURSE_INTENT_RE.search(msg)) and not is_course_list_intent(message)
 
 def is_greeting(message: str) -> bool:
     return _norm(message).lower() in GREETINGS
-
 
 def is_about_bot(message: str) -> bool:
     msg = _norm(message).lower()
     return any(k in msg for k in ABOUT_BOT_KEYWORDS)
 
-
 def is_capability_question(message: str) -> bool:
     msg = _norm(message).lower()
     return any(k in msg for k in CAPABILITY_KEYWORDS)
-
 
 def _looks_like_idk(answer: str) -> bool:
     if not answer:
@@ -229,7 +240,6 @@ def _looks_like_idk(answer: str) -> bool:
     if len(a) < 6:
         return True
     return False
-
 
 def _fallback_reply(user_message: str, context: str) -> str:
     msg = (user_message or "").strip().lower()
@@ -251,22 +261,21 @@ def _fallback_reply(user_message: str, context: str) -> str:
     if suggestions:
         bullets = "\n".join([f"- {s}" for s in suggestions[:3]])
         return (
-            "I don’t have that exact detail in the current course data I’m using.\n"
+            "I don't have that exact detail in the current course data I'm using.\n"
             f"{bullets}\n"
-            "What’s your goal—practice, judiciary prep, or research?"
+            "What's your goal—practice, judiciary prep, or research?"
         )
 
     if "law" in msg or "llb" in msg or "juris" in msg:
         return (
-            "I don’t have that specific detail in my current course list yet. "
+            "I don't have that specific detail in my current course list yet. "
             "Are you looking for law-focused IKS, legal philosophy, or governance and ethics?"
         )
 
     return (
-        "I don’t have that in my current course list yet. "
+        "I don't have that in my current course list yet. "
         "Are you trying to find course recommendations, eligibility, or syllabus details?"
     )
-
 
 def get_faq_answer(message: str) -> Optional[str]:
     message_lower = (message or "").lower()
@@ -287,17 +296,15 @@ def get_faq_answer(message: str) -> Optional[str]:
 
     return None
 
-
 def _should_cache(answer: str) -> bool:
     ans = (answer or "").strip().lower()
     if not ans:
         return False
     if IDK_CONTAINS_RE.search(ans):
         return False
-    if "i don’t have that" in ans or "i don't have that" in ans:
+    if "i don't have that" in ans or "i don’t have that" in ans:
         return False
     return True
-
 
 def _response(answer: str, sources: list[str], context_used: int, request_id: str) -> Dict:
     return {
@@ -307,11 +314,9 @@ def _response(answer: str, sources: list[str], context_used: int, request_id: st
         "request_id": request_id,
     }
 
-
 @app.get("/health")
 def health() -> Dict:
     return {"status": "ok"}
-
 
 @app.get("/history/{session_id}")
 def history(
@@ -322,7 +327,6 @@ def history(
     sid = _validate_session_id(session_id)
     msgs = get_recent_messages(session_id=sid, limit=50)
     return {"session_id": sid, "messages": msgs}
-
 
 @app.post("/chat")
 async def chat(
@@ -374,31 +378,60 @@ async def chat(
             request_id=request_id,
         )
 
+        # Handle greetings
         if is_greeting(user_message):
             answer = "Hello! How can I assist you today?"
             put_message(session_id=session_id, role="assistant", text=answer, request_id=request_id, sources=["local"], context_used=0)
             return _response(answer, ["local"], 0, request_id)
 
+        # Handle about bot
         if is_about_bot(user_message):
             answer = ABOUT_BOT_REPLY
             put_message(session_id=session_id, role="assistant", text=answer, request_id=request_id, sources=["local"], context_used=0)
             return _response(answer, ["local"], 0, request_id)
 
+        # Handle capabilities
         if is_capability_question(user_message):
             answer = CAPABILITY_REPLY
             put_message(session_id=session_id, role="assistant", text=answer, request_id=request_id, sources=["local"], context_used=0)
             return _response(answer, ["local"], 0, request_id)
 
-        # For correctness, only use cache for standalone turns
+        # Cache for standalone turns only
         if not has_prior_history and not _looks_like_followup(user_message):
             cached = get_cached(user_message)
             if cached:
                 put_message(session_id=session_id, role="assistant", text=cached, request_id=request_id, sources=["cache"], context_used=0)
                 return _response(cached, ["cache"], 0, request_id)
 
+        # NEW: Handle "list of courses" - Direct from courses.json
+        if is_course_list_intent(user_message):
+            if COURSE_DATA:
+                titles = [
+                    item.get("title") or item.get("course_name") or item.get("name") or f"Course {i+1}"
+                    for i, item in enumerate(COURSE_DATA[:20])
+                    if item.get("title") or item.get("course_name") or item.get("name")
+                ]
+                if titles:
+                    answer = (
+                        f"Here are all {len(titles)} available courses:\n\n"
+                        + "\n".join([f"• {t[:80]}{'...' if len(t) > 80 else ''}" for t in titles])
+                        + "\n\nWhich course interests you most?"
+                    )
+                else:
+                    answer = "Courses loaded but no titles found. Ask about specific domains like Law or IKS."
+            else:
+                answer = (
+                    "Course list not available yet. Create /data/courses.json with your course data, "
+                    "or ask about specific domains: Law, Management, Education, or Sanskrit."
+                )
+            
+            put_message(session_id=session_id, role="assistant", text=answer, request_id=request_id, sources=["courses.json"], context_used=0)
+            return _response(answer, ["courses.json"], 0, request_id)
+
+        # Existing course intent (RAG-based) for other course queries
         if is_course_intent(user_message):
             hits = retrieve_hits(user_message, k=8)
-            titles: list[str] = []
+            titles: List[str] = []
             seen = set()
 
             for hit in hits:
@@ -417,24 +450,26 @@ async def chat(
 
             if titles:
                 answer = (
-                    "Here are some courses I can see:\n"
+                    "Here are some relevant courses:\n"
                     + "\n".join([f"- {t}" for t in titles])
                     + "\n\nWhich one do you want details for?"
                 )
             else:
                 answer = (
-                    "I can share the course list, but I’m not seeing clear course titles in the current data. "
-                    "Which domain do you want—Law, Management, Education, or Sanskrit and Grammar?"
+                    "I can share the course list, but I'm not seeing clear course titles for your query. "
+                    "Try 'list of courses' for all courses, or specify: Law, Management, Education, or Sanskrit."
                 )
 
             put_message(session_id=session_id, role="assistant", text=answer, request_id=request_id, sources=["rag_list"], context_used=1)
             return _response(answer, ["rag_list"], 1, request_id)
 
+        # FAQ lookup
         faq_answer = get_faq_answer(user_message)
         if faq_answer:
             put_message(session_id=session_id, role="assistant", text=faq_answer, request_id=request_id, sources=["faq"], context_used=0)
             return _response(faq_answer, ["faq"], 0, request_id)
 
+        # RAG + LLM fallback
         context = retrieve_context(
             user_message,
             k=RAG_DEFAULT_K,
@@ -473,7 +508,6 @@ async def chat(
     except Exception:
         logger.exception("[%s] Unhandled error in /chat", request_id)
         raise HTTPException(status_code=500, detail="Internal error")
-
 
 if __name__ == "__main__":
     import uvicorn
