@@ -22,8 +22,6 @@ dist/
 build/
 *.egg-info/
 
-chroma_db/
-backend/chroma_db/
 
 frontend/
 frontend.zip
