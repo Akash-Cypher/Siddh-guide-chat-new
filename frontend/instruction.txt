@@ -67,20 +67,33 @@ function siddh_guide_chat_assets() {
     'siddh-guide-chat-css',
     get_stylesheet_directory_uri() . '/assets/siddh-chat/style.css',
     [],
-    '1.0'
+    null
   );
 
   wp_enqueue_script(
     'siddh-guide-chat-js',
     get_stylesheet_directory_uri() . '/assets/siddh-chat/siddh-guide-chat-widget.js',
     [],
-    '1.0',
+    null,
     true
   );
 
 }
 
 add_action('wp_enqueue_scripts', 'siddh_guide_chat_assets');
+
+function siddh_guide_chat_change_asset_version_param($src, $handle) {
+  $handles = ['siddh-guide-chat-js', 'siddh-guide-chat-css'];
+
+  if (in_array($handle, $handles, true)) {
+    $src = remove_query_arg('ver', $src);
+    $src = add_query_arg('v', '1.0.0', $src);
+  }
+
+  return $src;
+}
+add_filter('script_loader_src', 'siddh_guide_chat_change_asset_version_param', 10, 2);
+add_filter('style_loader_src', 'siddh_guide_chat_change_asset_version_param', 10, 2);
 
 This loads the chatbot CSS and JavaScript on the website.
 

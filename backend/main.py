@@ -194,6 +194,41 @@ def _norm(text: str) -> str:
     return " ".join((text or "").strip().split())
 
 
+def _normalize_course_text(text: str) -> str:
+    text = _norm(text).lower()
+    text = text.replace("—", "-")
+    text = re.sub(r"\s*-\s*", " - ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _course_title_variants(raw_title: str) -> set[str]:
+    raw_title = (raw_title or "").strip()
+    if not raw_title:
+        return set()
+
+    variants = {
+        raw_title,
+        raw_title.replace("—", "-"),
+        raw_title.replace("-", "—"),
+    }
+
+    parts = re.split(r"\s*[—-]\s*", raw_title, maxsplit=1)
+    if parts:
+        variants.add(parts[0].strip())
+
+    normalized = {_normalize_course_text(v) for v in variants if v.strip()}
+    return {v for v in normalized if v}
+
+
+def _extract_primary_title(raw_title: str) -> str:
+    raw_title = (raw_title or "").strip()
+    if not raw_title:
+        return ""
+    parts = re.split(r"\s*[—-]\s*", raw_title, maxsplit=1)
+    return parts[0].strip() if parts else raw_title
+
+
 def _check_api_key(x_api_key: Optional[str]) -> None:
     if not ENFORCE_API_KEY:
         return
@@ -346,6 +381,33 @@ def _expand_query_terms(tokens: list[str]) -> set[str]:
     return expanded
 
 
+def find_exact_course_title_match(message: str, course_data: list[dict]) -> Optional[dict]:
+    msg = _normalize_course_text(message)
+    if not msg:
+        return None
+
+    for item in course_data:
+        raw_title = (
+            item.get("title")
+            or item.get("course_name")
+            or item.get("name")
+            or ""
+        ).strip()
+
+        if not raw_title:
+            continue
+
+        variants = _course_title_variants(raw_title)
+        if msg in variants:
+            return {
+                "title": raw_title,
+                "display_title": _extract_primary_title(raw_title),
+                "content": (item.get("content") or "").strip(),
+            }
+
+    return None
+
+
 def rank_course_candidates(user_message: str, course_data: list[dict], limit: int = 8) -> list[dict]:
     tokens = _tokenize_query(user_message)
     expanded_terms = _expand_query_terms(tokens)
@@ -363,12 +425,12 @@ def rank_course_candidates(user_message: str, course_data: list[dict], limit: in
         if not raw_title:
             continue
 
-        title = raw_title.split("—")[0].strip()
+        title = _extract_primary_title(raw_title)
         if not title or title.lower() in seen:
             continue
 
         content = (item.get("content") or "").strip()
-        searchable_title = title.lower()
+        searchable_title = _normalize_course_text(raw_title)
         searchable_content = content.lower()
 
         score = 0
@@ -387,7 +449,6 @@ def rank_course_candidates(user_message: str, course_data: list[dict], limit: in
 
         score += min(matched_terms, 5)
 
-        # slight penalty for extremely broad matches with no title relevance
         if matched_terms > 0 and all(term not in searchable_title for term in expanded_terms):
             score -= 1
 
@@ -395,6 +456,7 @@ def rank_course_candidates(user_message: str, course_data: list[dict], limit: in
             ranked.append(
                 {
                     "title": title,
+                    "raw_title": raw_title,
                     "content": content,
                     "score": score,
                 }
@@ -462,24 +524,40 @@ def _fallback_reply(user_message: str, context: str) -> str:
 
 
 def get_faq_answer(message: str) -> Optional[str]:
-    message_lower = (message or "").lower()
+    message_lower = _norm(message).lower()
+
+    # never let FAQ hijack exact course title selections
+    exact_course = find_exact_course_title_match(message, COURSE_DATA) if COURSE_DATA else None
+    if exact_course:
+        return None
+
+    blocked_generic_keywords = {
+        "about", "company", "organization", "profile",
+        "mission", "vision", "siddhanta", "course", "courses",
+        "knowledge", "meta"
+    }
 
     for item in faq_data:
         for keyword in item.get("keywords", []):
-            kw = (keyword or "").strip().lower()
+            kw = _norm(keyword).lower()
             if not kw:
                 continue
 
+            # skip dangerous generic keywords
+            if kw in blocked_generic_keywords:
+                continue
+
+            # for multi-word phrases, prefer exact message match
             if " " in kw:
-                if kw in message_lower:
+                if message_lower == kw:
                     return item.get("answer")
                 continue
 
-            if re.search(r"\b" + re.escape(kw) + r"\b", message_lower):
+            # for single-word keywords, only allow if message itself is short/simple
+            if len(message_lower.split()) <= 3 and re.search(r"\b" + re.escape(kw) + r"\b", message_lower):
                 return item.get("answer")
 
     return None
-
 
 def _should_cache(answer: str) -> bool:
     ans = (answer or "").strip().lower()
@@ -615,14 +693,17 @@ async def chat(
                 )
                 return _response(cached, ["cache"], 0, request_id)
 
-        # Exact course-list style asks
         if is_course_list_intent(user_message):
             ranked = rank_course_candidates(user_message, COURSE_DATA, limit=20) if COURSE_DATA else []
             titles = [r["title"] for r in ranked] if ranked else [
-                (item.get("title") or item.get("course_name") or item.get("name") or "").strip()
+                _extract_primary_title(
+                    (item.get("title") or item.get("course_name") or item.get("name") or "").strip()
+                )
                 for item in COURSE_DATA[:20]
                 if (item.get("title") or item.get("course_name") or item.get("name"))
             ]
+
+            titles = [t for t in titles if t]
 
             if titles:
                 answer = (
@@ -643,7 +724,6 @@ async def chat(
             )
             return _response(answer, ["courses.json"], 1 if titles else 0, request_id)
 
-        # FAQ and procedural queries should not be swallowed by recommendation logic
         faq_answer = get_faq_answer(user_message)
         if faq_answer:
             put_message(
@@ -689,11 +769,45 @@ async def chat(
 
             return _response(answer, sources, context_used, request_id)
 
-        # Dynamic recommendation flow
+        if COURSE_DATA:
+            exact_course = find_exact_course_title_match(user_message, COURSE_DATA)
+            if exact_course:
+                context = (
+                    f"[source=courses.json]\n"
+                    f"Title: {exact_course['title']}\n"
+                    f"Content: {exact_course['content']}"
+                )
+
+                answer = generate_answer(
+                    user_message=(
+                        f"The user selected this course title: {exact_course['display_title']}. "
+                        "Give a short and direct overview based only on the provided course content. "
+                        "If available, mention what the course covers, who it suits, and key themes."
+                    ),
+                    context=context,
+                    history_messages=history_messages,
+                )
+
+                if _looks_like_idk(answer):
+                    answer = (
+                        f"{exact_course['display_title']} is available in our course database. "
+                        "I can share a short overview, syllabus, or eligibility guidance. "
+                        "Which one do you want?"
+                    )
+
+                put_message(
+                    session_id=session_id,
+                    role="assistant",
+                    text=answer,
+                    request_id=request_id,
+                    sources=["courses.json", "nova"],
+                    context_used=1,
+                )
+                return _response(answer, ["courses.json", "nova"], 1, request_id)
+
         if is_course_recommendation_intent(user_message):
             ranked = rank_course_candidates(user_message, COURSE_DATA, limit=8) if COURSE_DATA else []
 
-            # Supplement with RAG only if direct ranking is weak
             if len(ranked) < 3:
                 hits = retrieve_hits(user_message, k=8)
                 seen_titles = {r["title"].lower() for r in ranked}
@@ -702,14 +816,15 @@ async def chat(
                     title = (hit.get("title") or "").strip()
                     if not title:
                         first_line = hit.get("document", "").splitlines()[0].strip()
-                        if 4 <= len(first_line) <= 80:
+                        if 4 <= len(first_line) <= 120:
                             title = first_line
 
-                    title = title.split("—")[0].strip()
+                    title = _extract_primary_title(title)
                     if title and title.lower() not in seen_titles:
                         ranked.append(
                             {
                                 "title": title,
+                                "raw_title": title,
                                 "content": hit.get("document") or "",
                                 "score": 1,
                             }
@@ -720,7 +835,6 @@ async def chat(
                         break
 
             if ranked:
-                # user asked for only one best-fit course
                 if wants_single_recommendation(user_message) or len(ranked) == 1:
                     top = ranked[0]
                     context = f"[source=courses.json]\nTitle: {top['title']}\nContent: {top['content']}"
@@ -743,7 +857,6 @@ async def chat(
                     )
                     return _response(answer, ["courses.json", "nova"], 1, request_id)
 
-                # user asked for details
                 if wants_course_details(user_message):
                     top = ranked[0]
                     context = f"[source=courses.json]\nTitle: {top['title']}\nContent: {top['content']}"
@@ -791,7 +904,6 @@ async def chat(
             )
             return _response(answer, ["courses.json"], 0, request_id)
 
-        # General RAG + model flow
         context = retrieve_context(
             user_message,
             k=RAG_DEFAULT_K,

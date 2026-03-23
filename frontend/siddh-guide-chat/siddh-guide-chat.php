@@ -123,18 +123,34 @@ function siddh_guide_chat_enqueue_assets() {
     'siddh-guide-chat-style',
     SIDDH_GUIDE_CHAT_PLUGIN_URL . 'assets/style.css',
     [],
-    '1.0.0'
+    null
   );
 
   wp_enqueue_script(
     'siddh-guide-chat-widget',
     SIDDH_GUIDE_CHAT_PLUGIN_URL . 'assets/siddh-guide-chat-widget.js',
     [],
-    '1.0.0',
+    null,
     true
   );
 }
 add_action('wp_enqueue_scripts', 'siddh_guide_chat_enqueue_assets');
+
+/**
+ * Change asset version query param from ?ver= to ?v=
+ */
+function siddh_guide_chat_change_asset_version_param($src, $handle) {
+  $handles = ['siddh-guide-chat-widget', 'siddh-guide-chat-style'];
+
+  if (in_array($handle, $handles, true)) {
+    $src = remove_query_arg('ver', $src);
+    $src = add_query_arg('v', '1.0.0', $src);
+  }
+
+  return $src;
+}
+add_filter('script_loader_src', 'siddh_guide_chat_change_asset_version_param', 10, 2);
+add_filter('style_loader_src', 'siddh_guide_chat_change_asset_version_param', 10, 2);
 
 /**
  * Shortcode renderer
