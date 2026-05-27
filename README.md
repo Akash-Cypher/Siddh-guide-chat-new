@@ -6,15 +6,16 @@ flowchart TD
   G -->|Yes| L1[Local Greeting Response]
   G -->|No| F{FAQ Match?}
   F -->|Yes| L2[FAQ Answer from data/faq.json]
-  F -->|No| C{Cached Q/A?}
+  F -->|No| RAG[RAG Retrieve Hits]
 
-  C -->|Yes| L3[Return Cached Answer]
-  C -->|No| RAG[RAG Retrieve Context]
   RAG --> VDB[(Chroma Vector DB\nchroma_db/ persistent)]
   RAG --> EMB[Amazon Titan Embeddings\n(encode query + docs)]
 
-  VDB --> CTX[Top-K Context Chunks]
-  CTX --> LLM[Amazon Bedrock Titan Text\n(generate final answer)]
-  LLM --> API
-  API -->|Store Q/A in cache| CACHE[(Cache Store\n(in-memory/Redis optional))]
+  VDB --> VAL{Validated KB context\nwith citations?}
+  VAL -->|No| REF[KB-only refusal]
+  VAL -->|Yes| LLM[Amazon Bedrock Nova\n(generate grounded answer)]
+  LLM --> OUT{Answer supported by KB?}
+  OUT -->|No| REF
+  OUT -->|Yes| API
+  REF --> API
   API --> U

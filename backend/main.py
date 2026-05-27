@@ -5,13 +5,12 @@ import logging
 import re
 import uuid
 from contextlib import asynccontextmanager
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from cache import get_cached, put_cached
 from chat_store import get_recent_messages, history_to_model_messages, put_message
 from config import (
     ALLOWED_ORIGINS,
@@ -27,11 +26,12 @@ from config import (
     RAG_DEFAULT_K,
     RAG_MAX_CHUNK_CHARS,
     RAG_MAX_CONTEXT_CHARS,
+    RAG_MAX_DISTANCE,
     SESSION_ID_MAX_LEN,
     USE_HISTORY_FOR_CONTINUITY,
 )
 from models import generate_answer
-from rag import init_rag, retrieve_context, retrieve_hits
+from rag import init_rag, retrieve_hits
 
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),
@@ -42,7 +42,60 @@ logger = logging.getLogger("siddh_guide")
 faq_data: list[dict] = []
 COURSE_DATA: list[dict] = []
 
+REFUSAL_MESSAGE = (
+    "I can answer only from the Sidh Guide knowledge base. I don’t have this "
+    "information in the available course or website content. Please ask about "
+    "our courses, platform, enrollment, or learning content."
+)
+
 SESSION_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,100}$")
+
+PROMPT_INJECTION_RE = re.compile(
+    r"\b(ignore|bypass|forget|override|disregard)\b.*\b(instruction|instructions|rules|context|system|policy|knowledge base)\b"
+    r"|\b(from|using)\s+(your\s+)?(own|general|outside)\s+knowledge\b",
+    re.IGNORECASE,
+)
+
+OUT_OF_DOMAIN_PATTERNS = [
+    re.compile(r"\b(pm|prime minister|cm|chief minister|president|governor)\b", re.IGNORECASE),
+    re.compile(r"\b(today'?s news|current affairs|latest news|breaking news)\b", re.IGNORECASE),
+    re.compile(r"\b(joke|jokes|funny story|entertain me)\b", re.IGNORECASE),
+    re.compile(r"\b(weather|temperature|rain|forecast)\b", re.IGNORECASE),
+    re.compile(r"\b(virat kohli|cricket score|sports score)\b", re.IGNORECASE),
+    re.compile(r"\b(chatgpt|openai|large language model|llm)\b", re.IGNORECASE),
+    re.compile(r"\b(stock|stocks|share market|crypto|investment advice|financial advice)\b", re.IGNORECASE),
+    re.compile(r"\b(medical advice|diagnose|diagnosis|symptoms|prescription|medicine for)\b", re.IGNORECASE),
+    re.compile(r"\b(legal advice|lawsuit|court case|lawyer|contract advice)\b", re.IGNORECASE),
+    re.compile(
+        r"\b(write|generate|debug|fix|build|create)\b.*\b(code|python|javascript|java|c\+\+|html|css|sql|program|script)\b"
+        r"|\b(code|python|javascript|java|c\+\+|html|css|sql)\b.*\b(function|script|program|algorithm)\b",
+        re.IGNORECASE,
+    ),
+]
+
+VALIDATION_TOKEN_STOP_WORDS = {
+    "about", "above", "after", "again", "also", "and", "answer", "are", "ask",
+    "can", "could", "did", "does", "for", "from", "give", "have", "how", "into",
+    "is", "its", "me", "more", "my", "need", "of", "on", "or", "please", "should",
+    "show", "tell", "than", "that", "the", "their", "them", "there", "these",
+    "this", "those", "to", "today", "using", "was", "what", "when", "where",
+    "which", "who", "why", "with", "would", "write", "you", "your",
+}
+
+VALIDATION_ALIASES = {
+    "enroll": {"enroll", "enrol", "enrollment", "enrolment", "admission", "apply"},
+    "enrollment": {"enroll", "enrol", "enrollment", "enrolment", "admission", "apply"},
+    "fee": {"fee", "fees", "price", "pricing", "cost"},
+    "fees": {"fee", "fees", "price", "pricing", "cost"},
+    "price": {"fee", "fees", "price", "pricing", "cost"},
+    "certificate": {"certificate", "certification", "certified"},
+    "certification": {"certificate", "certification", "certified"},
+}
+
+ANSWER_VALIDATION_STOP_WORDS = VALIDATION_TOKEN_STOP_WORDS | {
+    "available", "based", "content", "context", "course", "courses", "guide",
+    "information", "knowledge", "provided", "sidh", "siddh", "siddhanta", "the",
+}
 
 GREETINGS = {
     "hello",
@@ -349,6 +402,232 @@ def _looks_like_idk(answer: str) -> bool:
     return False
 
 
+def is_prompt_injection(message: str) -> bool:
+    return bool(PROMPT_INJECTION_RE.search(_norm(message).lower()))
+
+
+def is_out_of_domain_query(message: str) -> bool:
+    msg = _norm(message).lower()
+    return any(pattern.search(msg) for pattern in OUT_OF_DOMAIN_PATTERNS)
+
+
+def _content_tokens(text: str, stop_words: set[str]) -> list[str]:
+    words = re.findall(r"[a-z0-9]+", (text or "").lower())
+    return [
+        w
+        for w in words
+        if (len(w) >= 3 or w in {"ai", "cm", "pm", "ug", "pg"})
+        and w not in stop_words
+    ]
+
+
+def _validation_terms(question: str) -> set[str]:
+    msg = _norm(question).lower()
+    terms = set(_content_tokens(msg, VALIDATION_TOKEN_STOP_WORDS))
+
+    if re.search(r"\bpm\b|\bprime minister\b", msg):
+        terms.update({"prime", "minister"})
+        terms.discard("pm")
+
+    if re.search(r"\bcm\b|\bchief minister\b", msg):
+        terms.update({"chief", "minister"})
+        terms.discard("cm")
+
+    return terms
+
+
+def _term_matches_context(term: str, context_tokens: set[str], context_text: str) -> bool:
+    aliases = VALIDATION_ALIASES.get(term, {term})
+    return any(alias in context_tokens or alias in context_text for alias in aliases)
+
+
+def _context_is_relevant(question: str, context_text: str) -> bool:
+    terms = _validation_terms(question)
+    if not terms:
+        return False
+
+    context_text = (context_text or "").lower()
+    context_tokens = set(re.findall(r"[a-z0-9]+", context_text))
+    matched = {term for term in terms if _term_matches_context(term, context_tokens, context_text)}
+
+    if is_out_of_domain_query(question):
+        # Out-of-domain questions are allowed only when the KB text explicitly
+        # contains the key topic terms; loose semantic similarity is not enough.
+        return len(matched) == len(terms)
+
+    if len(terms) <= 2:
+        return len(matched) == len(terms)
+
+    return len(matched) >= 2 and (len(matched) / len(terms)) >= 0.35
+
+
+def _validate_retrieved_hits(question: str, hits: list[dict]) -> list[dict]:
+    usable: list[dict] = []
+
+    for hit in hits or []:
+        doc = (hit.get("document") or "").strip()
+        source = (hit.get("source") or "").strip()
+        distance = hit.get("distance")
+
+        if not doc or not source or distance is None:
+            continue
+
+        try:
+            if float(distance) > RAG_MAX_DISTANCE:
+                continue
+        except (TypeError, ValueError):
+            continue
+
+        usable.append(hit)
+
+    if not usable:
+        return []
+
+    joined_context = "\n".join((hit.get("document") or "") for hit in usable)
+    if not _context_is_relevant(question, joined_context):
+        return []
+
+    return usable
+
+
+def _citations_from_hits(hits: list[dict]) -> list[str]:
+    citations: list[str] = []
+    seen = set()
+
+    for hit in hits:
+        source = (hit.get("source") or "").strip()
+        title = (hit.get("title") or "").strip()
+        if not source:
+            continue
+
+        label = f"{source} | {title}" if title else source
+        if label not in seen:
+            citations.append(label)
+            seen.add(label)
+
+    return citations
+
+
+def _build_context_from_hits(
+    hits: list[dict],
+    max_chars: int = RAG_MAX_CONTEXT_CHARS,
+    max_chunk_chars: int = RAG_MAX_CHUNK_CHARS,
+) -> str:
+    chunks = []
+    total = 0
+
+    for hit in hits:
+        src = (hit.get("source") or "").strip()
+        title = (hit.get("title") or "").strip()
+        doc = (hit.get("document") or "").strip()
+        if not src or not doc:
+            continue
+
+        header = f"[source={src}{' | ' + title if title else ''}]"
+        if len(doc) > max_chunk_chars:
+            doc = doc[:max_chunk_chars].rsplit(" ", 1)[0] + "..."
+
+        chunk = f"{header}\n{doc}"
+        if total + len(chunk) > max_chars:
+            remaining = max_chars - total
+            if remaining <= 0:
+                break
+            chunk = chunk[:remaining].rsplit(" ", 1)[0] + "..."
+            chunks.append(chunk)
+            break
+
+        chunks.append(chunk)
+        total += len(chunk)
+
+    return "\n\n---\n\n".join(chunks).strip()
+
+
+def _retrieve_validated_context(
+    question: str,
+    k: int = RAG_DEFAULT_K,
+    max_chars: int = RAG_MAX_CONTEXT_CHARS,
+    max_chunk_chars: int = RAG_MAX_CHUNK_CHARS,
+) -> tuple[str, list[str]]:
+    hits = retrieve_hits(question, k=k)
+    hits = _validate_retrieved_hits(question, hits)
+    citations = _citations_from_hits(hits)
+
+    if not hits or not citations:
+        return "", []
+
+    context = _build_context_from_hits(
+        hits,
+        max_chars=max_chars,
+        max_chunk_chars=max_chunk_chars,
+    )
+    if not context:
+        return "", []
+
+    return context, citations
+
+
+def _answer_supported_by_context(answer: str, context: str) -> bool:
+    if _looks_like_idk(answer) or not context.strip():
+        return False
+
+    context_text = context.lower()
+    context_tokens = set(re.findall(r"[a-z0-9]+", context_text))
+    answer_tokens = _content_tokens(answer, ANSWER_VALIDATION_STOP_WORDS)
+
+    if answer_tokens:
+        matched = [
+            token
+            for token in answer_tokens
+            if token in context_tokens or token in context_text
+        ]
+        if len(answer_tokens) <= 3 and len(matched) < len(answer_tokens):
+            return False
+        if len(answer_tokens) > 3 and (len(matched) < 2 or len(matched) / len(answer_tokens) < 0.25):
+            return False
+
+    # Codes, dates, numbers, and acronyms are high-risk factual claims.
+    claim_markers = re.findall(r"\b[A-Z]{2,}[A-Z0-9-]*\b|\b\d+(?:\.\d+)?\b", answer)
+    for marker in claim_markers:
+        if marker.lower() in {"iks", "ug", "pg"}:
+            continue
+        if marker.lower() not in context_text:
+            return False
+
+    for sentence in re.split(r"(?<=[.!?])\s+", answer.strip()):
+        sentence_tokens = _content_tokens(sentence, ANSWER_VALIDATION_STOP_WORDS)
+        if len(sentence_tokens) >= 4:
+            sentence_matches = [
+                token
+                for token in sentence_tokens
+                if token in context_tokens or token in context_text
+            ]
+            if not sentence_matches:
+                return False
+
+    return True
+
+
+def _generated_answer_or_refusal(
+    user_message: str,
+    context: str,
+    citations: list[str],
+    history_messages: list[dict],
+) -> tuple[str, bool]:
+    if not context or not citations:
+        return REFUSAL_MESSAGE, False
+
+    answer = generate_answer(
+        user_message=user_message,
+        context=context,
+        history_messages=history_messages,
+    )
+
+    if not _answer_supported_by_context(answer, context):
+        return REFUSAL_MESSAGE, False
+
+    return answer, True
+
+
 def _tokenize_query(text: str) -> list[str]:
     stop_words = {
         "course", "courses", "program", "programs", "certificate", "certification",
@@ -467,62 +746,6 @@ def rank_course_candidates(user_message: str, course_data: list[dict], limit: in
     return ranked[:limit]
 
 
-def _fallback_reply(user_message: str, context: str) -> str:
-    msg = (user_message or "").strip().lower()
-
-    suggestions: list[str] = []
-    if context and context.strip():
-        lines = [ln.strip() for ln in context.splitlines() if ln.strip()]
-        for ln in lines:
-            if ln.startswith("[source="):
-                continue
-            if any(
-                k in ln.lower()
-                for k in [
-                    "course",
-                    "law",
-                    "jurisprudence",
-                    "governance",
-                    "philosophy",
-                    "ethics",
-                    "iks",
-                    "design",
-                    "education",
-                ]
-            ):
-                clean = ln
-                if len(clean) > 90:
-                    clean = clean[:90].rsplit(" ", 1)[0] + "…"
-                suggestions.append(clean)
-            if len(suggestions) >= 3:
-                break
-
-    if suggestions:
-        bullets = "\n".join([f"- {s}" for s in suggestions[:3]])
-        return (
-            "I don’t have that exact detail in the current course data I’m using.\n"
-            f"{bullets}\n"
-            "Do you want recommendations, syllabus details, or eligibility?"
-        )
-
-    if "law" in msg or "llb" in msg or "juris" in msg:
-        return (
-            "I can help with law-related IKS course recommendations. "
-            "Do you want the best course to start with or a short list?"
-        )
-
-    if "architect" in msg or "architecture" in msg or "design" in msg:
-        return (
-            "I can help with design and architecture-related IKS course recommendations. "
-            "Do you want one best-fit course or a short list?"
-        )
-
-    return (
-        "I can help with course recommendations, syllabus details, eligibility, or enrolment guidance. "
-        "Tell me your field or goal."
-    )
-
-
 def get_faq_answer(message: str) -> Optional[str]:
     message_lower = _norm(message).lower()
 
@@ -559,24 +782,97 @@ def get_faq_answer(message: str) -> Optional[str]:
 
     return None
 
-def _should_cache(answer: str) -> bool:
-    ans = (answer or "").strip().lower()
-    if not ans:
-        return False
-    if IDK_CONTAINS_RE.search(ans):
-        return False
-    if "i don’t have that" in ans or "i don't have that" in ans:
-        return False
-    return True
-
-
-def _response(answer: str, sources: list[str], context_used: int, request_id: str) -> Dict:
+def _response(
+    answer: str,
+    sources: list[str],
+    context_used: int,
+    request_id: str,
+    citations: Optional[list[str]] = None,
+    status: str = "ok",
+) -> Dict:
     return {
         "answer": answer,
+        "status": status,
         "sources": sources,
         "context_used": context_used,
+        "citations": citations or [],
         "request_id": request_id,
     }
+
+
+def _store_assistant_message(
+    session_id: str,
+    answer: str,
+    request_id: str,
+    sources: list[str],
+    context_used: int,
+) -> None:
+    put_message(
+        session_id=session_id,
+        role="assistant",
+        text=answer,
+        request_id=request_id,
+        sources=sources,
+        context_used=context_used,
+    )
+
+
+def _refusal_response(session_id: str, request_id: str) -> Dict:
+    # KB-only enforcement: when retrieval is empty, weak, irrelevant, or
+    # uncited, the model is not called and the standard refusal is returned.
+    sources = ["kb_refusal"]
+    _store_assistant_message(
+        session_id=session_id,
+        answer=REFUSAL_MESSAGE,
+        request_id=request_id,
+        sources=sources,
+        context_used=0,
+    )
+    return _response(
+        REFUSAL_MESSAGE,
+        sources,
+        0,
+        request_id,
+        citations=[],
+        status="refused",
+    )
+
+
+def _rag_answer_response(
+    user_message: str,
+    history_messages: list[dict],
+    session_id: str,
+    request_id: str,
+) -> Dict:
+    context, citations = _retrieve_validated_context(
+        user_message,
+        k=RAG_DEFAULT_K,
+        max_chars=RAG_MAX_CONTEXT_CHARS,
+        max_chunk_chars=RAG_MAX_CHUNK_CHARS,
+    )
+
+    if not context or not citations:
+        return _refusal_response(session_id, request_id)
+
+    answer, supported = _generated_answer_or_refusal(
+        user_message=user_message,
+        context=context,
+        citations=citations,
+        history_messages=history_messages,
+    )
+
+    if not supported:
+        return _refusal_response(session_id, request_id)
+
+    sources = ["rag", "nova"]
+    _store_assistant_message(
+        session_id=session_id,
+        answer=answer,
+        request_id=request_id,
+        sources=sources,
+        context_used=1,
+    )
+    return _response(answer, sources, 1, request_id, citations=citations)
 
 
 @app.get("/health")
@@ -680,18 +976,8 @@ async def chat(
             )
             return _response(answer, ["local"], 0, request_id)
 
-        if not has_prior_history and not _looks_like_followup(user_message):
-            cached = get_cached(user_message)
-            if cached:
-                put_message(
-                    session_id=session_id,
-                    role="assistant",
-                    text=cached,
-                    request_id=request_id,
-                    sources=["cache"],
-                    context_used=0,
-                )
-                return _response(cached, ["cache"], 0, request_id)
+        # KB-only enforcement: legacy cache entries do not carry retrieval
+        # context or citations, so they are not trusted as answer sources.
 
         if is_course_list_intent(user_message):
             ranked = rank_course_candidates(user_message, COURSE_DATA, limit=20) if COURSE_DATA else []
@@ -704,6 +990,9 @@ async def chat(
             ]
 
             titles = [t for t in titles if t]
+
+            if not titles:
+                return _refusal_response(session_id, request_id)
 
             if titles:
                 answer = (
@@ -722,7 +1011,13 @@ async def chat(
                 sources=["courses.json"],
                 context_used=1 if titles else 0,
             )
-            return _response(answer, ["courses.json"], 1 if titles else 0, request_id)
+            return _response(
+                answer,
+                ["courses.json"],
+                1 if titles else 0,
+                request_id,
+                citations=["courses.json"] if titles else [],
+            )
 
         faq_answer = get_faq_answer(user_message)
         if faq_answer:
@@ -734,40 +1029,16 @@ async def chat(
                 sources=["faq"],
                 context_used=0,
             )
-            return _response(faq_answer, ["faq"], 0, request_id)
+            return _response(faq_answer, ["faq"], 0, request_id, citations=["faq"])
+
+        if is_prompt_injection(user_message):
+            return _refusal_response(session_id, request_id)
+
+        if is_out_of_domain_query(user_message):
+            return _rag_answer_response(user_message, history_messages, session_id, request_id)
 
         if is_procedural_query(user_message):
-            context = retrieve_context(
-                user_message,
-                k=RAG_DEFAULT_K,
-                max_chars=RAG_MAX_CONTEXT_CHARS,
-                max_chunk_chars=RAG_MAX_CHUNK_CHARS,
-            )
-            context_used = 1 if context else 0
-            sources = ["rag", "nova"] if context_used else ["nova"]
-
-            answer = generate_answer(
-                user_message=user_message,
-                context=context,
-                history_messages=history_messages,
-            )
-
-            if _looks_like_idk(answer):
-                answer = _fallback_reply(user_message, context)
-
-            put_message(
-                session_id=session_id,
-                role="assistant",
-                text=answer,
-                request_id=request_id,
-                sources=sources,
-                context_used=context_used,
-            )
-
-            if (not has_prior_history) and (not _looks_like_followup(user_message)) and _should_cache(answer):
-                put_cached(user_message, answer)
-
-            return _response(answer, sources, context_used, request_id)
+            return _rag_answer_response(user_message, history_messages, session_id, request_id)
 
         if COURSE_DATA:
             exact_course = find_exact_course_title_match(user_message, COURSE_DATA)
@@ -777,23 +1048,21 @@ async def chat(
                     f"Title: {exact_course['title']}\n"
                     f"Content: {exact_course['content']}"
                 )
+                citations = [f"courses.json | {exact_course['title']}"]
 
-                answer = generate_answer(
+                answer, supported = _generated_answer_or_refusal(
                     user_message=(
                         f"The user selected this course title: {exact_course['display_title']}. "
                         "Give a short and direct overview based only on the provided course content. "
                         "If available, mention what the course covers, who it suits, and key themes."
                     ),
                     context=context,
+                    citations=citations,
                     history_messages=history_messages,
                 )
 
-                if _looks_like_idk(answer):
-                    answer = (
-                        f"{exact_course['display_title']} is available in our course database. "
-                        "I can share a short overview, syllabus, or eligibility guidance. "
-                        "Which one do you want?"
-                    )
+                if not supported:
+                    return _refusal_response(session_id, request_id)
 
                 put_message(
                     session_id=session_id,
@@ -803,13 +1072,13 @@ async def chat(
                     sources=["courses.json", "nova"],
                     context_used=1,
                 )
-                return _response(answer, ["courses.json", "nova"], 1, request_id)
+                return _response(answer, ["courses.json", "nova"], 1, request_id, citations=citations)
 
         if is_course_recommendation_intent(user_message):
             ranked = rank_course_candidates(user_message, COURSE_DATA, limit=8) if COURSE_DATA else []
 
             if len(ranked) < 3:
-                hits = retrieve_hits(user_message, k=8)
+                hits = _validate_retrieved_hits(user_message, retrieve_hits(user_message, k=8))
                 seen_titles = {r["title"].lower() for r in ranked}
 
                 for hit in hits:
@@ -838,15 +1107,20 @@ async def chat(
                 if wants_single_recommendation(user_message) or len(ranked) == 1:
                     top = ranked[0]
                     context = f"[source=courses.json]\nTitle: {top['title']}\nContent: {top['content']}"
-                    answer = generate_answer(
+                    citations = [f"courses.json | {top['title']}"]
+                    answer, supported = _generated_answer_or_refusal(
                         user_message=(
                             f"The user asked: {user_message}\n"
                             "Recommend only the single best-fit course from the provided context "
                             "and explain briefly why it suits the user."
                         ),
                         context=context,
+                        citations=citations,
                         history_messages=history_messages,
                     )
+                    if not supported:
+                        return _refusal_response(session_id, request_id)
+
                     put_message(
                         session_id=session_id,
                         role="assistant",
@@ -855,16 +1129,21 @@ async def chat(
                         sources=["courses.json", "nova"],
                         context_used=1,
                     )
-                    return _response(answer, ["courses.json", "nova"], 1, request_id)
+                    return _response(answer, ["courses.json", "nova"], 1, request_id, citations=citations)
 
                 if wants_course_details(user_message):
                     top = ranked[0]
                     context = f"[source=courses.json]\nTitle: {top['title']}\nContent: {top['content']}"
-                    answer = generate_answer(
+                    citations = [f"courses.json | {top['title']}"]
+                    answer, supported = _generated_answer_or_refusal(
                         user_message=user_message,
                         context=context,
+                        citations=citations,
                         history_messages=history_messages,
                     )
+                    if not supported:
+                        return _refusal_response(session_id, request_id)
+
                     put_message(
                         session_id=session_id,
                         role="assistant",
@@ -873,7 +1152,7 @@ async def chat(
                         sources=["courses.json", "nova"],
                         context_used=1,
                     )
-                    return _response(answer, ["courses.json", "nova"], 1, request_id)
+                    return _response(answer, ["courses.json", "nova"], 1, request_id, citations=citations)
 
                 answer = (
                     "Here are some relevant courses:\n"
@@ -888,53 +1167,11 @@ async def chat(
                     sources=["courses.json"],
                     context_used=1,
                 )
-                return _response(answer, ["courses.json"], 1, request_id)
+                return _response(answer, ["courses.json"], 1, request_id, citations=["courses.json"])
 
-            answer = (
-                "I can help with course recommendations, but I’m not seeing strong matches yet. "
-                "Tell me your field like Law, Architecture, Management, Education, or Sanskrit."
-            )
-            put_message(
-                session_id=session_id,
-                role="assistant",
-                text=answer,
-                request_id=request_id,
-                sources=["courses.json"],
-                context_used=0,
-            )
-            return _response(answer, ["courses.json"], 0, request_id)
+            return _refusal_response(session_id, request_id)
 
-        context = retrieve_context(
-            user_message,
-            k=RAG_DEFAULT_K,
-            max_chars=RAG_MAX_CONTEXT_CHARS,
-            max_chunk_chars=RAG_MAX_CHUNK_CHARS,
-        )
-        context_used = 1 if context else 0
-        sources = ["rag", "nova"] if context_used else ["nova"]
-
-        answer = generate_answer(
-            user_message=user_message,
-            context=context,
-            history_messages=history_messages,
-        )
-
-        if _looks_like_idk(answer):
-            answer = _fallback_reply(user_message, context)
-
-        put_message(
-            session_id=session_id,
-            role="assistant",
-            text=answer,
-            request_id=request_id,
-            sources=sources,
-            context_used=context_used,
-        )
-
-        if (not has_prior_history) and (not _looks_like_followup(user_message)) and _should_cache(answer):
-            put_cached(user_message, answer)
-
-        return _response(answer, sources, context_used, request_id)
+        return _rag_answer_response(user_message, history_messages, session_id, request_id)
 
     except HTTPException:
         raise
