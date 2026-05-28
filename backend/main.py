@@ -43,9 +43,9 @@ faq_data: list[dict] = []
 COURSE_DATA: list[dict] = []
 
 REFUSAL_MESSAGE = (
-    "I can answer only from the Sidh Guide knowledge base. I don’t have this "
-    "information in the available course or website content. Please ask about "
-    "our courses, platform, enrollment, or learning content."
+    "I can help with Sidh Guide course and website information. Please ask about "
+    "our courses, syllabus, learning outcomes, course recommendations, enrollment "
+    "details shown on the website, or Siddhanta Knowledge Foundation."
 )
 
 SESSION_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,100}$")
@@ -62,6 +62,7 @@ OUT_OF_DOMAIN_PATTERNS = [
     re.compile(r"\b(today'?s news|current affairs|latest news|breaking news)\b", re.IGNORECASE),
     re.compile(r"\b(joke|jokes|funny story|entertain me)\b", re.IGNORECASE),
     re.compile(r"\b(weather|temperature|rain|forecast)\b", re.IGNORECASE),
+    re.compile(r"\b(device|devices|laptop|mobile|phone|desktop|computer|tablet|browser)\b|\bwatch\b.*\bcourse\b", re.IGNORECASE),
     re.compile(r"\b(virat kohli|cricket score|sports score)\b", re.IGNORECASE),
     re.compile(r"\b(chatgpt|openai|large language model|llm)\b", re.IGNORECASE),
     re.compile(r"\b(stock|stocks|share market|crypto|investment advice|financial advice)\b", re.IGNORECASE),
@@ -943,12 +944,12 @@ def get_why_choose_siddhanta_answer() -> Optional[str]:
             continue
 
         return (
-            "From the Sidh Guide knowledge base, Siddhanta Knowledge Foundation works "
-            "to revive, nurture, and develop Indian Knowledge Systems through education, "
-            "research, and technology-enabled platforms. The KB also says Siddhanta "
-            "collaborates with premier Indian institutions, is developing over 100 "
-            "IKS-based courses for learners across disciplines, and creates learning "
-            "resources for different age groups."
+            "Siddhanta Knowledge Foundation works to revive, nurture, and develop "
+            "Indian Knowledge Systems through education, research, and "
+            "technology-enabled platforms. Siddhanta collaborates with premier "
+            "Indian institutions, is developing over 100 IKS-based courses for "
+            "learners across disciplines, and creates learning resources for "
+            "different age groups."
         )
 
     return None

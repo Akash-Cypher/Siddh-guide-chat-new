@@ -53,6 +53,14 @@ def assert_refusal(response):
     assert data["citations"] == []
 
 
+def test_refusal_message_is_user_friendly():
+    lowered = REFUSAL.lower()
+    assert "knowledge base" not in lowered
+    assert "i don" not in lowered
+    assert "not available" not in lowered
+    assert "please ask about" in lowered
+
+
 def test_kb_question_returns_grounded_answer_with_citation(client, monkeypatch):
     monkeypatch.setattr(
         main,
@@ -228,6 +236,27 @@ def test_joke_question_is_refused(client, monkeypatch):
     monkeypatch.setattr(main, "generate_answer", no_model_call)
 
     assert_refusal(post_chat(client, "Tell me a joke"))
+
+
+def test_device_question_is_refused_without_model_guess(client, monkeypatch):
+    monkeypatch.setattr(
+        main,
+        "retrieve_hits",
+        lambda *args, **kwargs: [
+            {
+                "document": (
+                    "Course title: Indic perspective on Communication and Discourse Analysis\n"
+                    "The course includes detailed modules and textual content."
+                ),
+                "source": "courses.json",
+                "title": "Indic perspective on Communication and Discourse Analysis",
+                "distance": 0.05,
+            }
+        ],
+    )
+    monkeypatch.setattr(main, "generate_answer", no_model_call)
+
+    assert_refusal(post_chat(client, "Which device is best to watch the course?"))
 
 
 def test_coding_question_is_refused(client, monkeypatch):
