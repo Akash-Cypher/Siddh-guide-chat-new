@@ -49,6 +49,7 @@ REFUSAL_MESSAGE = (
 )
 
 SESSION_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,100}$")
+TITLE_SEPARATOR_RE = re.compile(r"\s+[\-\u2013\u2014]\s+")
 
 PROMPT_INJECTION_RE = re.compile(
     r"\b(ignore|bypass|forget|override|disregard)\b.*\b(instruction|instructions|rules|context|system|policy|knowledge base)\b"
@@ -148,6 +149,10 @@ IDK_LINE_RE = re.compile(
     re.IGNORECASE,
 )
 IDK_CONTAINS_RE = re.compile(r"\b(i\s*(do\s*not|don't|dont)\s*know)\b", re.IGNORECASE)
+UNSUPPORTED_CONTAINS_RE = re.compile(
+    r"\b(not available|not present|not provided|not mentioned|not contain|does not contain|not in the context|not in the knowledge base)\b",
+    re.IGNORECASE,
+)
 
 FOLLOWUP_RE = re.compile(
     r"\b(it|that|this|those|these|they|them|above|earlier|previous|same|continue|more|elaborate)\b",
@@ -180,6 +185,29 @@ COURSE_LIST_PHRASES = [
     "show courses",
     "tell me courses",
 ]
+
+COURSE_COUNT_RE = re.compile(
+    r"\b(total|count|number|how many)\b.*\b(course|courses|program|programs)\b"
+    r"|\b(course|courses|program|programs)\b.*\b(total|count|number|how many)\b"
+    r"|^\s*total\s+count\s*$",
+    re.IGNORECASE,
+)
+
+WHY_CHOOSE_SIDDHANTA_RE = re.compile(
+    r"\bwhy\b.*\b(choose|chose|select|study at|study with)\b.*\b(siddhanta|skf|sidh guide|siddh guide)\b"
+    r"|\bwhy\b.*\b(siddhanta|skf)\b",
+    re.IGNORECASE,
+)
+
+COURSE_OUTCOME_OR_CAREER_RE = re.compile(
+    r"\b(job|jobs|career|placement|employment|where.*use|where.*apply|what.*get|outcome|benefit|after.*course)\b",
+    re.IGNORECASE,
+)
+
+VAGUE_COURSE_REFERENCE_RE = re.compile(
+    r"\b(this|that|it)\b.*\b(course|use|apply|job|career|get|outcome|benefit)\b",
+    re.IGNORECASE,
+)
 
 PROCEDURAL_QUERY_RE = re.compile(
     r"\b(enrol|enroll|admission|apply|application|process|procedure|fee|fees|cost|duration|eligibility|certificate|certification|what is|what are|how to|how do)\b",
@@ -249,7 +277,7 @@ def _norm(text: str) -> str:
 
 def _normalize_course_text(text: str) -> str:
     text = _norm(text).lower()
-    text = text.replace("—", "-")
+    text = text.replace("—", "-").replace("–", "-")
     text = re.sub(r"\s*-\s*", " - ", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text
@@ -263,10 +291,11 @@ def _course_title_variants(raw_title: str) -> set[str]:
     variants = {
         raw_title,
         raw_title.replace("—", "-"),
+        raw_title.replace("–", "-"),
         raw_title.replace("-", "—"),
     }
 
-    parts = re.split(r"\s*[—-]\s*", raw_title, maxsplit=1)
+    parts = TITLE_SEPARATOR_RE.split(raw_title, maxsplit=1)
     if parts:
         variants.add(parts[0].strip())
 
@@ -278,7 +307,7 @@ def _extract_primary_title(raw_title: str) -> str:
     raw_title = (raw_title or "").strip()
     if not raw_title:
         return ""
-    parts = re.split(r"\s*[—-]\s*", raw_title, maxsplit=1)
+    parts = TITLE_SEPARATOR_RE.split(raw_title, maxsplit=1)
     return parts[0].strip() if parts else raw_title
 
 
@@ -330,9 +359,25 @@ def _looks_like_followup(message: str) -> bool:
     return False
 
 
+def is_course_count_question(message: str) -> bool:
+    return bool(COURSE_COUNT_RE.search(_norm(message).lower()))
+
+
 def is_course_list_intent(message: str) -> bool:
     msg = _norm(message).lower()
     return any(phrase in msg for phrase in COURSE_LIST_PHRASES)
+
+
+def is_why_choose_siddhanta(message: str) -> bool:
+    return bool(WHY_CHOOSE_SIDDHANTA_RE.search(_norm(message).lower()))
+
+
+def is_course_outcome_or_career_query(message: str) -> bool:
+    msg = _norm(message).lower()
+    return bool(
+        COURSE_OUTCOME_OR_CAREER_RE.search(msg)
+        or VAGUE_COURSE_REFERENCE_RE.search(msg)
+    )
 
 
 def is_procedural_query(message: str) -> bool:
@@ -396,6 +441,8 @@ def _looks_like_idk(answer: str) -> bool:
     if IDK_LINE_RE.match(a):
         return True
     if IDK_CONTAINS_RE.search(a):
+        return True
+    if UNSUPPORTED_CONTAINS_RE.search(a):
         return True
     if len(a) < 6:
         return True
@@ -687,6 +734,112 @@ def find_exact_course_title_match(message: str, course_data: list[dict]) -> Opti
     return None
 
 
+def _unique_course_titles(course_data: list[dict]) -> list[str]:
+    titles: list[str] = []
+    seen = set()
+
+    for item in course_data:
+        raw_title = (
+            item.get("title")
+            or item.get("course_name")
+            or item.get("name")
+            or ""
+        ).strip()
+
+        title = _extract_primary_title(raw_title)
+        key = _normalize_course_text(title)
+        if title and key not in seen:
+            titles.append(title)
+            seen.add(key)
+
+    return titles
+
+
+def find_course_title_in_message(message: str, course_data: list[dict]) -> Optional[dict]:
+    msg = _normalize_course_text(message)
+    if not msg:
+        return None
+
+    best: Optional[dict] = None
+    best_len = 0
+
+    for item in course_data:
+        raw_title = (
+            item.get("title")
+            or item.get("course_name")
+            or item.get("name")
+            or ""
+        ).strip()
+        if not raw_title:
+            continue
+
+        primary_title = _extract_primary_title(raw_title)
+        variants = _course_title_variants(raw_title) | _course_title_variants(primary_title)
+
+        for variant in variants:
+            if len(variant) < 8:
+                continue
+            if variant in msg and len(variant) > best_len:
+                best = {
+                    "title": raw_title,
+                    "display_title": primary_title,
+                    "content": (item.get("content") or "").strip(),
+                }
+                best_len = len(variant)
+
+    return best
+
+
+def _course_context_for_title(title: str, course_data: list[dict]) -> tuple[str, list[str]]:
+    display_title = _extract_primary_title(title)
+    title_key = _normalize_course_text(display_title)
+    related: list[dict] = []
+
+    for item in course_data:
+        raw_title = (
+            item.get("title")
+            or item.get("course_name")
+            or item.get("name")
+            or ""
+        ).strip()
+        if _normalize_course_text(_extract_primary_title(raw_title)) == title_key:
+            related.append(item)
+
+    if not related:
+        return "", []
+
+    def priority(item: dict) -> int:
+        title_text = (item.get("title") or "").lower()
+        if "objective" in title_text or "outcome" in title_text:
+            return 0
+        if "curriculum" in title_text:
+            return 1
+        if "overview" in title_text:
+            return 2
+        return 3
+
+    chunks = [f"[source=courses.json | {display_title}]\nTitle: {display_title}"]
+    total = len(chunks[0])
+
+    for item in sorted(related, key=priority):
+        raw_title = (item.get("title") or display_title).strip()
+        content = (item.get("content") or "").strip()
+        if not content:
+            continue
+        chunk = f"Section: {raw_title}\n{content}"
+        if total + len(chunk) > RAG_MAX_CONTEXT_CHARS:
+            remaining = RAG_MAX_CONTEXT_CHARS - total
+            if remaining <= 80:
+                break
+            chunk = chunk[:remaining].rsplit(" ", 1)[0] + "..."
+            chunks.append(chunk)
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+
+    return "\n\n".join(chunks), [f"courses.json | {display_title}"]
+
+
 def rank_course_candidates(user_message: str, course_data: list[dict], limit: int = 8) -> list[dict]:
     tokens = _tokenize_query(user_message)
     expanded_terms = _expand_query_terms(tokens)
@@ -781,6 +934,25 @@ def get_faq_answer(message: str) -> Optional[str]:
                 return item.get("answer")
 
     return None
+
+
+def get_why_choose_siddhanta_answer() -> Optional[str]:
+    for item in faq_data:
+        answer = (item.get("answer") or "").strip()
+        if "Siddhanta Knowledge Foundation" not in answer:
+            continue
+
+        return (
+            "From the Sidh Guide knowledge base, Siddhanta Knowledge Foundation works "
+            "to revive, nurture, and develop Indian Knowledge Systems through education, "
+            "research, and technology-enabled platforms. The KB also says Siddhanta "
+            "collaborates with premier Indian institutions, is developing over 100 "
+            "IKS-based courses for learners across disciplines, and creates learning "
+            "resources for different age groups."
+        )
+
+    return None
+
 
 def _response(
     answer: str,
@@ -979,6 +1151,40 @@ async def chat(
         # KB-only enforcement: legacy cache entries do not carry retrieval
         # context or citations, so they are not trusted as answer sources.
 
+        if is_course_count_question(user_message):
+            titles = _unique_course_titles(COURSE_DATA) if COURSE_DATA else []
+            if not titles:
+                return _refusal_response(session_id, request_id)
+
+            answer = (
+                f"There are {len(titles)} courses available in the current "
+                "Sidh Guide course database."
+            )
+            put_message(
+                session_id=session_id,
+                role="assistant",
+                text=answer,
+                request_id=request_id,
+                sources=["courses.json"],
+                context_used=1,
+            )
+            return _response(answer, ["courses.json"], 1, request_id, citations=["courses.json"])
+
+        if is_why_choose_siddhanta(user_message):
+            answer = get_why_choose_siddhanta_answer()
+            if not answer:
+                return _refusal_response(session_id, request_id)
+
+            put_message(
+                session_id=session_id,
+                role="assistant",
+                text=answer,
+                request_id=request_id,
+                sources=["faq"],
+                context_used=1,
+            )
+            return _response(answer, ["faq"], 1, request_id, citations=["faq"])
+
         if is_course_list_intent(user_message):
             ranked = rank_course_candidates(user_message, COURSE_DATA, limit=20) if COURSE_DATA else []
             titles = [r["title"] for r in ranked] if ranked else [
@@ -994,14 +1200,11 @@ async def chat(
             if not titles:
                 return _refusal_response(session_id, request_id)
 
-            if titles:
-                answer = (
-                    "Here are some available courses:\n\n"
-                    + "\n".join([f"• {t}" for t in titles[:20]])
-                    + "\n\nWhich one do you want details for?"
-                )
-            else:
-                answer = "I’m not seeing course titles in the current data."
+            answer = (
+                "Here are some available courses:\n\n"
+                + "\n".join([f"• {t}" for t in titles[:20]])
+                + "\n\nWhich one do you want details for?"
+            )
 
             put_message(
                 session_id=session_id,
@@ -1009,14 +1212,14 @@ async def chat(
                 text=answer,
                 request_id=request_id,
                 sources=["courses.json"],
-                context_used=1 if titles else 0,
+                context_used=1,
             )
             return _response(
                 answer,
                 ["courses.json"],
-                1 if titles else 0,
+                1,
                 request_id,
-                citations=["courses.json"] if titles else [],
+                citations=["courses.json"],
             )
 
         faq_answer = get_faq_answer(user_message)
@@ -1037,10 +1240,38 @@ async def chat(
         if is_out_of_domain_query(user_message):
             return _rag_answer_response(user_message, history_messages, session_id, request_id)
 
-        if is_procedural_query(user_message):
-            return _rag_answer_response(user_message, history_messages, session_id, request_id)
-
         if COURSE_DATA:
+            course_in_message = find_course_title_in_message(user_message, COURSE_DATA)
+            if course_in_message:
+                context, citations = _course_context_for_title(course_in_message["title"], COURSE_DATA)
+                if not context or not citations:
+                    return _refusal_response(session_id, request_id)
+
+                answer, supported = _generated_answer_or_refusal(
+                    user_message=(
+                        f"The user asked about this course: {course_in_message['display_title']}.\n"
+                        f"User question: {user_message}\n"
+                        "Answer only from the provided course records. If the question asks "
+                        "for jobs, placements, devices, enrollment, or other details not "
+                        "present in the course records, say the KB does not contain that information."
+                    ),
+                    context=context,
+                    citations=citations,
+                    history_messages=history_messages,
+                )
+                if not supported:
+                    return _refusal_response(session_id, request_id)
+
+                put_message(
+                    session_id=session_id,
+                    role="assistant",
+                    text=answer,
+                    request_id=request_id,
+                    sources=["courses.json", "nova"],
+                    context_used=1,
+                )
+                return _response(answer, ["courses.json", "nova"], 1, request_id, citations=citations)
+
             exact_course = find_exact_course_title_match(user_message, COURSE_DATA)
             if exact_course:
                 context = (
@@ -1073,6 +1304,12 @@ async def chat(
                     context_used=1,
                 )
                 return _response(answer, ["courses.json", "nova"], 1, request_id, citations=citations)
+
+        if is_course_outcome_or_career_query(user_message):
+            return _rag_answer_response(user_message, history_messages, session_id, request_id)
+
+        if is_procedural_query(user_message):
+            return _rag_answer_response(user_message, history_messages, session_id, request_id)
 
         if is_course_recommendation_intent(user_message):
             ranked = rank_course_candidates(user_message, COURSE_DATA, limit=8) if COURSE_DATA else []

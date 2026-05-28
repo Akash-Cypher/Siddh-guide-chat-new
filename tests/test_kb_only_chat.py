@@ -85,6 +85,119 @@ def test_kb_question_returns_grounded_answer_with_citation(client, monkeypatch):
     assert data["citations"] == ["courses.json | Indic Reasoning and Debating Overview"]
 
 
+def test_course_count_returns_local_count_without_model(client, monkeypatch):
+    monkeypatch.setattr(
+        main,
+        "COURSE_DATA",
+        [
+            {"title": "Indic Reasoning and Debating — Overview", "content": "Course title: Indic Reasoning"},
+            {"title": "Indic Reasoning and Debating — Curriculum", "content": "Curriculum"},
+            {"title": "Indic Design Thinking — Overview", "content": "Course title: Indic Design Thinking"},
+        ],
+    )
+    monkeypatch.setattr(main, "generate_answer", no_model_call)
+
+    response = post_chat(client, "total count")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "ok"
+    assert "2 courses" in data["answer"]
+    assert data["citations"] == ["courses.json"]
+
+
+def test_why_choose_siddhanta_uses_existing_faq_without_model(client, monkeypatch):
+    monkeypatch.setattr(
+        main,
+        "faq_data",
+        [
+            {
+                "keywords": ["about siddhanta knowledge foundation"],
+                "answer": (
+                    "Siddhanta Knowledge Foundation (Siddhanta) is part of the Siddhanta Group. "
+                    "The organization works towards reviving, nurturing, and developing Indian "
+                    "Knowledge Systems (IKS) through education, research, and technology-enabled "
+                    "platforms. Siddhanta collaborates with premier Indian institutions. "
+                    "Siddhanta is developing over 100 cutting-edge IKS-based courses."
+                ),
+            }
+        ],
+    )
+    monkeypatch.setattr(main, "generate_answer", no_model_call)
+
+    response = post_chat(client, "Why i need to chose SKF?")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "ok"
+    assert "develop Indian Knowledge Systems" in data["answer"]
+    assert data["citations"] == ["faq"]
+
+
+def test_course_title_inside_question_answers_from_that_course(client, monkeypatch):
+    monkeypatch.setattr(
+        main,
+        "COURSE_DATA",
+        [
+            {
+                "title": "IKS Perspectives on Sustainability: Agriculture — Objectives & Outcomes",
+                "content": (
+                    "Course Outcome: Learners understand traditional agricultural practices, "
+                    "sustainable Indian farming techniques, and IKS approaches to botanical science."
+                ),
+            },
+            {
+                "title": "IKS Perspectives on Sustainability: Agriculture — Overview",
+                "content": "Course title: IKS Perspectives on Sustainability: Agriculture",
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        main,
+        "generate_answer",
+        lambda **kwargs: (
+            "Learners understand traditional agricultural practices, sustainable Indian "
+            "farming techniques, and IKS approaches to botanical science."
+        ),
+    )
+
+    response = post_chat(
+        client,
+        "If am study a IKS Perspectives on Sustainability: Agriculture course means what i will get",
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "ok"
+    assert "sustainable Indian farming techniques" in data["answer"]
+    assert data["citations"] == ["courses.json | IKS Perspectives on Sustainability: Agriculture"]
+
+
+def test_course_job_claim_not_supported_is_refused(client, monkeypatch):
+    monkeypatch.setattr(
+        main,
+        "COURSE_DATA",
+        [
+            {
+                "title": "IKS Perspectives on Sustainability: Agriculture — Objectives & Outcomes",
+                "content": "Course Outcome: Learners understand sustainable Indian farming techniques.",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        main,
+        "generate_answer",
+        lambda **kwargs: "You can get a job as an agriculture consultant.",
+    )
+
+    assert_refusal(
+        post_chat(
+            client,
+            "If am study a IKS Perspectives on Sustainability: Agriculture course means where i will get a job",
+        )
+    )
+
+
 @pytest.mark.parametrize(
     "message",
     [
