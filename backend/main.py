@@ -44,7 +44,7 @@ COURSE_DATA: list[dict] = []
 WEBSITE_DATA: list[dict] = []
 
 REFUSAL_MESSAGE = (
-    "I can help with Sidh Guide course and website information. Please ask about "
+    "I can help with Siddhanta course and website information. Please ask about "
     "our courses, syllabus, learning outcomes, course recommendations, enrollment "
     "details shown on the website, or Siddhanta Knowledge Foundation."
 )
@@ -478,7 +478,7 @@ def _strip_embedded_refusal(answer: str) -> str:
         line.strip()
         for line in answer.splitlines()
         if line.strip()
-        and "i can help with sidh guide course and website information" not in line.lower()
+        and "i can help with siddhanta course and website information" not in line.lower()
     ]
     return "\n".join(lines).strip()
 
