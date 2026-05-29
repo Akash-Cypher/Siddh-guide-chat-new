@@ -41,6 +41,7 @@ logger = logging.getLogger("siddh_guide")
 
 faq_data: list[dict] = []
 COURSE_DATA: list[dict] = []
+WEBSITE_DATA: list[dict] = []
 
 REFUSAL_MESSAGE = (
     "I can help with Sidh Guide course and website information. Please ask about "
@@ -238,7 +239,7 @@ class ChatRequest(BaseModel):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global faq_data, COURSE_DATA
+    global faq_data, COURSE_DATA, WEBSITE_DATA
 
     with FAQ_PATH.open("r", encoding="utf-8") as f:
         faq_data = json.load(f)
@@ -255,6 +256,19 @@ async def lifespan(app: FastAPI):
     else:
         logger.warning("courses.json not found in data directory")
         COURSE_DATA = []
+
+    website_path = FAQ_PATH.parent / "website.json"
+    if website_path.exists():
+        try:
+            with website_path.open("r", encoding="utf-8") as f:
+                WEBSITE_DATA = json.load(f)
+            logger.info("Loaded %s website entries from website.json", len(WEBSITE_DATA))
+        except Exception:
+            logger.exception("Failed to load website.json")
+            WEBSITE_DATA = []
+    else:
+        logger.info("website.json not found in data directory")
+        WEBSITE_DATA = []
 
     init_rag()
     logger.info("Startup complete: FAQ loaded + RAG initialized + Courses loaded")
@@ -955,6 +969,100 @@ def get_why_choose_siddhanta_answer() -> Optional[str]:
     return None
 
 
+def _website_entry_by_id(raw_id: str) -> Optional[dict]:
+    for item in WEBSITE_DATA:
+        if (item.get("id") or "").strip() == raw_id:
+            return item
+    return None
+
+
+def _website_entry_for_query(message: str) -> Optional[dict]:
+    msg = _norm(message).lower()
+    if not msg:
+        return None
+
+    raw_id = None
+
+    if re.search(r"\b(refund|refunds|return|returns|cancel|cancellation)\b", msg):
+        raw_id = "refund-policy"
+    elif re.search(r"\b(contact|support|help|reach|phone|email|message form|get in touch)\b", msg):
+        raw_id = "contact-support"
+    elif re.search(r"\b(enrol|enroll|enrollment|enrolment|admission|apply|join|register|registration)\b", msg):
+        raw_id = "enrollment-overview"
+    elif re.search(r"\b(price|pricing|fee|fees|cost|amount|gst)\b", msg):
+        # Keep course-specific price questions on the course route when a
+        # course title is present; use website pricing only for general price
+        # questions that the website pricing entry can support directly.
+        if COURSE_DATA and find_course_title_in_message(message, COURSE_DATA):
+            return None
+        raw_id = "pricing-information"
+    elif "privacy policy" in msg:
+        raw_id = "privacy-policy"
+    elif "terms of use" in msg or "terms and conditions" in msg:
+        raw_id = "terms-of-use-overview"
+    elif "copyright policy" in msg:
+        raw_id = "copyright-policy"
+
+    return _website_entry_by_id(raw_id) if raw_id else None
+
+
+def _website_answer_for_entry(entry: dict) -> Optional[str]:
+    raw_id = (entry.get("id") or "").strip()
+    content = (entry.get("content") or "").strip()
+    if not content:
+        return None
+
+    if raw_id == "enrollment-overview":
+        return (
+            "To enroll, open the course page and use the Click To Enroll button "
+            "shown near the course price. The website also shows course discovery "
+            "links such as Join A Course, Explore, Read More, and View All. "
+            "The accessed pages do not show a detailed step-by-step payment, login, "
+            "or enrollment workflow."
+        )
+
+    if raw_id == "refund-policy":
+        return (
+            "Siddhanta Knowledge Foundation's refund policy says all purchases of "
+            "courses and related educational materials are final. Refunds are "
+            "generally not offered once a purchase has been made. In exceptional "
+            "circumstances, users may contact the support team with a detailed "
+            "explanation, and the request will be reviewed case by case."
+        )
+
+    if raw_id == "contact-support":
+        return (
+            "You can contact Siddhanta through the Contact page form. The visible "
+            "fields are Name, Email, and Comment or Message, followed by a Contact "
+            "Us button. The accessed Contact page does not show a phone number or "
+            "direct support email."
+        )
+
+    if raw_id == "pricing-information":
+        return (
+            "Course prices are shown on individual course pages, not as one single "
+            "general pricing table. Several Siksha course pages show Rs. 2,500.00 "
+            "with GST additional, some show $75.00 with fee additional, and the "
+            "Aajivan Arthasastra course shows Rs. 99.00 including GST as the current "
+            "price. Ask about a specific course for its visible price."
+        )
+
+    return content
+
+
+def get_website_answer(message: str) -> Optional[tuple[str, list[str]]]:
+    entry = _website_entry_for_query(message)
+    if not entry:
+        return None
+
+    answer = _website_answer_for_entry(entry)
+    if not answer:
+        return None
+
+    title = (entry.get("title") or entry.get("id") or "Website").strip()
+    return answer, [f"website.json | {title}"]
+
+
 def _response(
     answer: str,
     sources: list[str],
@@ -1240,6 +1348,22 @@ async def chat(
 
         if is_out_of_domain_query(user_message):
             return _rag_answer_response(user_message, history_messages, session_id, request_id)
+
+        website_answer = get_website_answer(user_message)
+        if website_answer:
+            # KB-only enforcement: common website/policy/enrollment questions are
+            # answered directly from website.json so short queries do not fall
+            # through to a general model answer or weak vector match.
+            answer, citations = website_answer
+            put_message(
+                session_id=session_id,
+                role="assistant",
+                text=answer,
+                request_id=request_id,
+                sources=["website.json"],
+                context_used=1,
+            )
+            return _response(answer, ["website.json"], 1, request_id, citations=citations)
 
         if COURSE_DATA:
             course_in_message = find_course_title_in_message(user_message, COURSE_DATA)

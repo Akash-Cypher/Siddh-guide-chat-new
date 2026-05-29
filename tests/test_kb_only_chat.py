@@ -24,6 +24,7 @@ def isolated_backend(monkeypatch):
     monkeypatch.setattr(main, "ALLOW_DEFAULT_SESSION", True)
     monkeypatch.setattr(main, "faq_data", [])
     monkeypatch.setattr(main, "COURSE_DATA", [])
+    monkeypatch.setattr(main, "WEBSITE_DATA", [])
     monkeypatch.setattr(main, "get_recent_messages", lambda *args, **kwargs: [])
     monkeypatch.setattr(main, "history_to_model_messages", lambda *args, **kwargs: [])
     monkeypatch.setattr(main, "put_message", lambda *args, **kwargs: None)
@@ -140,6 +141,81 @@ def test_why_choose_siddhanta_uses_existing_faq_without_model(client, monkeypatc
     assert data["status"] == "ok"
     assert "develop Indian Knowledge Systems" in data["answer"]
     assert data["citations"] == ["faq"]
+
+
+def test_enrollment_question_uses_website_data_without_model(client, monkeypatch):
+    monkeypatch.setattr(
+        main,
+        "WEBSITE_DATA",
+        [
+            {
+                "id": "enrollment-overview",
+                "title": "Enrollment Information Visible on Course Pages",
+                "content": (
+                    "Individual course pages display a Click To Enroll button "
+                    "near the course price."
+                ),
+            }
+        ],
+    )
+    monkeypatch.setattr(main, "generate_answer", no_model_call)
+
+    response = post_chat(client, "how to enroll")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "ok"
+    assert "Click To Enroll" in data["answer"]
+    assert data["citations"] == ["website.json | Enrollment Information Visible on Course Pages"]
+
+
+def test_refund_policy_uses_website_data_without_model(client, monkeypatch):
+    monkeypatch.setattr(
+        main,
+        "WEBSITE_DATA",
+        [
+            {
+                "id": "refund-policy",
+                "title": "Refund Policy",
+                "content": (
+                    "All purchases of courses and related educational materials are final. "
+                    "Exceptional circumstances may warrant a refund request."
+                ),
+            }
+        ],
+    )
+    monkeypatch.setattr(main, "generate_answer", no_model_call)
+
+    response = post_chat(client, "refund policy")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "ok"
+    assert "purchases" in data["answer"]
+    assert data["citations"] == ["website.json | Refund Policy"]
+
+
+def test_contact_support_uses_website_data_without_model(client, monkeypatch):
+    monkeypatch.setattr(
+        main,
+        "WEBSITE_DATA",
+        [
+            {
+                "id": "contact-support",
+                "title": "Contact Siddhanta Knowledge Foundation",
+                "content": "The Contact page displays a form with Name, Email, and Message fields.",
+            }
+        ],
+    )
+    monkeypatch.setattr(main, "generate_answer", no_model_call)
+
+    response = post_chat(client, "contact support")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "ok"
+    assert "Contact page form" in data["answer"]
+    assert data["citations"] == ["website.json | Contact Siddhanta Knowledge Foundation"]
 
 
 def test_course_title_inside_question_answers_from_that_course(client, monkeypatch):
