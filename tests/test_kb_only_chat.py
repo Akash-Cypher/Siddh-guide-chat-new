@@ -218,6 +218,138 @@ def test_contact_support_uses_website_data_without_model(client, monkeypatch):
     assert data["citations"] == ["website.json | Contact Siddhanta Knowledge Foundation"]
 
 
+def test_general_course_price_prefers_website_data_over_faq(client, monkeypatch):
+    monkeypatch.setattr(
+        main,
+        "WEBSITE_DATA",
+        [
+            {
+                "id": "pricing-information",
+                "title": "Pricing Information Visible on Course Pages",
+                "content": (
+                    "Pricing is shown on individual course pages. Several pages show "
+                    "Rs. 2,500.00 with GST additional."
+                ),
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        main,
+        "faq_data",
+        [
+            {
+                "keywords": ["course price"],
+                "answer": "The price for each course varies.",
+            }
+        ],
+    )
+    monkeypatch.setattr(main, "generate_answer", no_model_call)
+
+    response = post_chat(client, "course price")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "ok"
+    assert "individual course pages" in data["answer"]
+    assert data["citations"] == ["website.json | Pricing Information Visible on Course Pages"]
+
+
+def test_siksha_question_uses_website_data_without_model(client, monkeypatch):
+    monkeypatch.setattr(
+        main,
+        "WEBSITE_DATA",
+        [
+            {
+                "id": "siksha-platform-overview",
+                "title": "Siksha Education Platform Overview",
+                "category": "platform",
+                "content": (
+                    "Siksha is presented as an education initiative of Siddhanta. "
+                    "The homepage lists courses across Foundation, Agriculture, "
+                    "Arts and Humanities, Education, Law, Management, Medicine and STEM."
+                ),
+            }
+        ],
+    )
+    monkeypatch.setattr(main, "generate_answer", no_model_call)
+
+    response = post_chat(client, "tell me about siksha")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "ok"
+    assert data["answer"].startswith("Siksha is Siddhanta's education initiative")
+    assert REFUSAL not in data["answer"]
+    assert data["citations"] == ["website.json | Siksha Education Platform Overview"]
+
+
+def test_aajivan_question_uses_website_data_without_model(client, monkeypatch):
+    monkeypatch.setattr(
+        main,
+        "WEBSITE_DATA",
+        [
+            {
+                "id": "aajivan-overview",
+                "title": "Aajivan Learning Experiences",
+                "category": "course",
+                "content": (
+                    "Aajivan is described as Siddhanta's set of 1-hour capsule "
+                    "learning experiences in multiple subjects."
+                ),
+            }
+        ],
+    )
+    monkeypatch.setattr(main, "generate_answer", no_model_call)
+
+    response = post_chat(client, "about aajivan")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "ok"
+    assert "1-hour capsule learning experiences" in data["answer"]
+    assert data["citations"] == ["website.json | Aajivan Learning Experiences"]
+
+
+def test_specific_course_price_uses_website_course_entry(client, monkeypatch):
+    monkeypatch.setattr(
+        main,
+        "COURSE_DATA",
+        [
+            {
+                "title": "Basic Principles of Arthashastra — Overview",
+                "content": "Course title: Basic Principles of Arthashastra",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        main,
+        "WEBSITE_DATA",
+        [
+            {
+                "id": "course-basic-principles-arthashastra",
+                "title": "Basic Principles of Arthashastra",
+                "category": "course",
+                "keywords": ["Basic Principles of Arthashastra", "Arthashastra"],
+                "content": (
+                    "Course title: Basic Principles of Arthashastra. Duration: 15 Hours. "
+                    "Applicable audience: UG/PG. Categories shown: Arts and Humanities, "
+                    "Law, Management. Price shown: $75.00 (Fee additional). The course "
+                    "describes the Arthashastra as an ancient Indian treatise."
+                ),
+            }
+        ],
+    )
+    monkeypatch.setattr(main, "generate_answer", no_model_call)
+
+    response = post_chat(client, "price of Basic Principles of Arthashastra")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "ok"
+    assert data["answer"] == "The visible price for Basic Principles of Arthashastra is $75.00 (Fee additional)."
+    assert data["citations"] == ["website.json | Basic Principles of Arthashastra"]
+
+
 def test_course_title_inside_question_answers_from_that_course(client, monkeypatch):
     monkeypatch.setattr(
         main,
@@ -398,6 +530,40 @@ def test_unsupported_generated_claim_is_replaced_with_refusal(client, monkeypatc
     )
 
     assert_refusal(post_chat(client, "What is the course code for Indic Reasoning and Debating?"))
+
+
+def test_generated_answer_with_appended_friendly_fallback_is_cleaned(client, monkeypatch):
+    monkeypatch.setattr(
+        main,
+        "retrieve_hits",
+        lambda *args, **kwargs: [
+            {
+                "document": (
+                    "Siksha is an education initiative of Siddhanta. "
+                    "Siksha integrates Indian Knowledge Systems with contemporary education."
+                ),
+                "source": "website.json",
+                "title": "Siksha Education Platform Overview",
+                "distance": 0.05,
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        main,
+        "generate_answer",
+        lambda **kwargs: (
+            "Siksha is an education initiative of Siddhanta.\n\n"
+            + REFUSAL
+        ),
+    )
+
+    response = post_chat(client, "what is siksha education initiative")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "ok"
+    assert data["answer"] == "Siksha is an education initiative of Siddhanta."
+    assert REFUSAL not in data["answer"]
 
 
 def test_prompt_injection_is_refused_without_retrieval_or_model(client, monkeypatch):

@@ -453,6 +453,8 @@ def _looks_like_idk(answer: str) -> bool:
     if not answer:
         return True
     a = answer.strip()
+    if REFUSAL_MESSAGE.lower() in a.lower():
+        return True
     if IDK_LINE_RE.match(a):
         return True
     if IDK_CONTAINS_RE.search(a):
@@ -462,6 +464,23 @@ def _looks_like_idk(answer: str) -> bool:
     if len(a) < 6:
         return True
     return False
+
+
+def _strip_embedded_refusal(answer: str) -> str:
+    answer = (answer or "").strip()
+    if not answer:
+        return ""
+
+    if REFUSAL_MESSAGE in answer:
+        answer = answer.replace(REFUSAL_MESSAGE, "").strip()
+
+    lines = [
+        line.strip()
+        for line in answer.splitlines()
+        if line.strip()
+        and "i can help with sidh guide course and website information" not in line.lower()
+    ]
+    return "\n".join(lines).strip()
 
 
 def is_prompt_injection(message: str) -> bool:
@@ -683,6 +702,7 @@ def _generated_answer_or_refusal(
         context=context,
         history_messages=history_messages,
     )
+    answer = _strip_embedded_refusal(answer)
 
     if not _answer_supported_by_context(answer, context):
         return REFUSAL_MESSAGE, False
@@ -976,10 +996,56 @@ def _website_entry_by_id(raw_id: str) -> Optional[dict]:
     return None
 
 
+def _is_website_course_entry(item: dict) -> bool:
+    if (item.get("category") or "").strip().lower() != "course":
+        return False
+
+    raw_id = (item.get("id") or "").strip().lower()
+    content = (item.get("content") or "").lower()
+    return (
+        raw_id.startswith(("course-", "mdp-"))
+        or "course title:" in content
+        or "program title:" in content
+    )
+
+
+def _website_course_entry_in_message(message: str) -> Optional[dict]:
+    msg = _normalize_course_text(message)
+    if not msg:
+        return None
+
+    best: Optional[dict] = None
+    best_len = 0
+
+    for item in WEBSITE_DATA:
+        if not _is_website_course_entry(item):
+            continue
+
+        raw_title = (item.get("title") or "").strip()
+        variants = _course_title_variants(raw_title)
+        for keyword in item.get("keywords", []):
+            kw = (keyword or "").strip()
+            if len(kw) >= 8:
+                variants.update(_course_title_variants(kw))
+
+        for variant in variants:
+            if len(variant) < 8:
+                continue
+            if variant in msg and len(variant) > best_len:
+                best = item
+                best_len = len(variant)
+
+    return best
+
+
 def _website_entry_for_query(message: str) -> Optional[dict]:
     msg = _norm(message).lower()
     if not msg:
         return None
+
+    course_entry = _website_course_entry_in_message(message)
+    if course_entry:
+        return course_entry
 
     raw_id = None
 
@@ -990,12 +1056,21 @@ def _website_entry_for_query(message: str) -> Optional[dict]:
     elif re.search(r"\b(enrol|enroll|enrollment|enrolment|admission|apply|join|register|registration)\b", msg):
         raw_id = "enrollment-overview"
     elif re.search(r"\b(price|pricing|fee|fees|cost|amount|gst)\b", msg):
-        # Keep course-specific price questions on the course route when a
-        # course title is present; use website pricing only for general price
-        # questions that the website pricing entry can support directly.
-        if COURSE_DATA and find_course_title_in_message(message, COURSE_DATA):
-            return None
         raw_id = "pricing-information"
+    elif "what siddhanta does" in msg or "what does siddhanta do" in msg:
+        raw_id = "about-what-siddhanta-does"
+    elif re.search(r"\b(siksha|shiksha)\b", msg):
+        raw_id = "siksha-platform-overview"
+    elif re.search(r"\baajivan\b", msg):
+        raw_id = "aajivan-overview"
+    elif re.search(r"\bsandhaan\b", msg):
+        raw_id = "sandhaan-technology-overview"
+    elif "siddhanta kosha" in msg:
+        raw_id = "siddhanta-kosha-overview"
+    elif "shastra maps" in msg or "shaastra maps" in msg:
+        raw_id = "shastra-maps-overview"
+    elif re.search(r"\bshodha\b", msg):
+        raw_id = "shodha-research-overview"
     elif "privacy policy" in msg:
         raw_id = "privacy-policy"
     elif "terms of use" in msg or "terms and conditions" in msg:
@@ -1006,11 +1081,84 @@ def _website_entry_for_query(message: str) -> Optional[dict]:
     return _website_entry_by_id(raw_id) if raw_id else None
 
 
-def _website_answer_for_entry(entry: dict) -> Optional[str]:
+def _extract_labeled_value(content: str, label: str) -> Optional[str]:
+    pattern = (
+        rf"\b{re.escape(label)}\s*:\s*(.*?)"
+        r"(?=\.\s+(?:Course title|Duration|Applicable audience|Category shown|"
+        r"Categories shown|Price shown|The course|This course|The page|"
+        r"Enrollment steps|Program title|Program type|Users should)|$)"
+    )
+    match = re.search(pattern, content or "", re.IGNORECASE | re.DOTALL)
+    if not match:
+        return None
+
+    value = _norm(match.group(1)).strip(" .")
+    return value or None
+
+
+def _website_course_answer_for_entry(entry: dict, message: str) -> Optional[str]:
+    content = (entry.get("content") or "").strip()
+    title = (
+        _extract_labeled_value(content, "Course title")
+        or (entry.get("title") or "").strip()
+    )
+    msg = _norm(message).lower()
+
+    price = _extract_labeled_value(content, "Price shown")
+    duration = _extract_labeled_value(content, "Duration")
+    audience = _extract_labeled_value(content, "Applicable audience")
+    categories = (
+        _extract_labeled_value(content, "Categories shown")
+        or _extract_labeled_value(content, "Category shown")
+    )
+
+    if re.search(r"\b(price|pricing|fee|fees|cost|amount|gst)\b", msg):
+        if price:
+            return f"The visible price for {title} is {price}."
+        return f"The accessed course page for {title} does not show a visible price."
+
+    if re.search(r"\b(duration|hours|time|how long)\b", msg):
+        if duration:
+            return f"The visible duration for {title} is {duration}."
+        return f"The accessed course page for {title} does not show a visible duration."
+
+    if re.search(r"\b(eligible|eligibility|audience|who can|suitable)\b", msg):
+        if audience:
+            return f"The applicable audience shown for {title} is {audience}."
+        return f"The accessed course page for {title} does not show eligibility details."
+
+    if re.search(r"\b(category|categories|stream|area)\b", msg):
+        if categories:
+            return f"The categories shown for {title} are {categories}."
+        return f"The accessed course page for {title} does not show categories."
+
+    if re.search(r"\b(enrol|enroll|enrollment|enrolment|admission|apply|join|register)\b", msg):
+        return (
+            f"For {title}, the accessed course page shows a Click To Enroll "
+            "button. It does not show detailed enrollment steps beyond that button."
+        )
+
+    parts = [f"{title} is listed as a Sidh Guide/Siksha course."]
+    if duration:
+        parts.append(f"Duration: {duration}.")
+    if audience:
+        parts.append(f"Applicable audience: {audience}.")
+    if categories:
+        parts.append(f"Categories shown: {categories}.")
+    if price:
+        parts.append(f"Visible price: {price}.")
+
+    return " ".join(parts)
+
+
+def _website_answer_for_entry(entry: dict, message: str) -> Optional[str]:
     raw_id = (entry.get("id") or "").strip()
     content = (entry.get("content") or "").strip()
     if not content:
         return None
+
+    if _is_website_course_entry(entry):
+        return _website_course_answer_for_entry(entry, message)
 
     if raw_id == "enrollment-overview":
         return (
@@ -1047,6 +1195,31 @@ def _website_answer_for_entry(entry: dict) -> Optional[str]:
             "price. Ask about a specific course for its visible price."
         )
 
+    if raw_id == "siksha-platform-overview":
+        return (
+            "Siksha is Siddhanta's education initiative for exploring Indic "
+            "wisdom through online courses. The website lists course areas such "
+            "as Foundation, Agriculture, Arts and Humanities, Education, Law, "
+            "Management, Medicine, and STEM."
+        )
+
+    if raw_id == "aajivan-overview":
+        return (
+            "Aajivan is Siddhanta's set of 1-hour capsule learning experiences "
+            "anchored in Indian Knowledge Systems and Indic traditions. The page "
+            "describes these courses as rooted in ancient insights and designed "
+            "for modern living and applications."
+        )
+
+    if raw_id == "about-what-siddhanta-does":
+        return (
+            "Siddhanta creates courses, textbooks, educational videos, "
+            "publications, and films on Shastras, Ancient Indian Knowledge "
+            "System and Heritage, Indian History, and Civilisation. The website "
+            "also says Siddhanta uses technology tools to make this wisdom "
+            "accessible in contemporary formats."
+        )
+
     return content
 
 
@@ -1055,7 +1228,7 @@ def get_website_answer(message: str) -> Optional[tuple[str, list[str]]]:
     if not entry:
         return None
 
-    answer = _website_answer_for_entry(entry)
+    answer = _website_answer_for_entry(entry, message)
     if not answer:
         return None
 
@@ -1331,18 +1504,6 @@ async def chat(
                 citations=["courses.json"],
             )
 
-        faq_answer = get_faq_answer(user_message)
-        if faq_answer:
-            put_message(
-                session_id=session_id,
-                role="assistant",
-                text=faq_answer,
-                request_id=request_id,
-                sources=["faq"],
-                context_used=0,
-            )
-            return _response(faq_answer, ["faq"], 0, request_id, citations=["faq"])
-
         if is_prompt_injection(user_message):
             return _refusal_response(session_id, request_id)
 
@@ -1364,6 +1525,18 @@ async def chat(
                 context_used=1,
             )
             return _response(answer, ["website.json"], 1, request_id, citations=citations)
+
+        faq_answer = get_faq_answer(user_message)
+        if faq_answer:
+            put_message(
+                session_id=session_id,
+                role="assistant",
+                text=faq_answer,
+                request_id=request_id,
+                sources=["faq"],
+                context_used=0,
+            )
+            return _response(faq_answer, ["faq"], 0, request_id, citations=["faq"])
 
         if COURSE_DATA:
             course_in_message = find_course_title_in_message(user_message, COURSE_DATA)
