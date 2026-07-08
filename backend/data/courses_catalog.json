@@ -306,32 +306,6 @@
     "modified": "2026-05-11"
   },
   {
-    "title": "Applied Ayurveda: Personalizing Your Well-Being",
-    "slug": "applied-ayurveda-personalizing-your-well-being",
-    "url": "https://siksha.siddhantaknowledge.org/applied-ayurveda-personalizing-your-well-being/",
-    "categories": [
-      "Aajivan"
-    ],
-    "price": "$ 10.00",
-    "duration": null,
-    "audience": null,
-    "published": "2025-02-23",
-    "modified": "2026-05-26"
-  },
-  {
-    "title": "Designing with Aucitya: The Science of Propreity in Indian Aesthetics",
-    "slug": "designing-with-aucitya-the-science-of-propreity-in-indian-aesthetics",
-    "url": "https://siksha.siddhantaknowledge.org/designing-with-aucitya-the-science-of-propreity-in-indian-aesthetics/",
-    "categories": [
-      "Aajivan"
-    ],
-    "price": "$ 10.00",
-    "duration": null,
-    "audience": null,
-    "published": "2025-02-18",
-    "modified": "2026-05-26"
-  },
-  {
     "title": "Indian Law and Jurisprudence",
     "slug": "indian-law-and-jurisprudence",
     "url": "https://siksha.siddhantaknowledge.org/indian-law-and-jurisprudence/",
@@ -362,19 +336,6 @@
     "modified": "2026-05-09"
   },
   {
-    "title": "Ayurveda: The Science of Wellness- Basic",
-    "slug": "ayurveda-the-science-of-wellness-basic",
-    "url": "https://siksha.siddhantaknowledge.org/ayurveda-the-science-of-wellness-basic/",
-    "categories": [
-      "Medicine"
-    ],
-    "price": "₹ 2,500.00",
-    "duration": "15 Hours",
-    "audience": "UG",
-    "published": "2025-01-03",
-    "modified": "2026-06-09"
-  },
-  {
     "title": "Language coding & Linguistic Impact",
     "slug": "language-coding-linguistic-impact",
     "url": "https://siksha.siddhantaknowledge.org/language-coding-linguistic-impact/",
@@ -402,20 +363,6 @@
     "audience": "UG",
     "published": "2024-09-05",
     "modified": "2026-04-10"
-  },
-  {
-    "title": "Indian Vision for Human Society",
-    "slug": "indian-vision-for-human-society",
-    "url": "https://siksha.siddhantaknowledge.org/indian-vision-for-human-society/",
-    "categories": [
-      "Arts and Humanities",
-      "Foundation"
-    ],
-    "price": "₹ 2,500.00",
-    "duration": "15 Hours",
-    "audience": "UG/PG",
-    "published": "2024-05-28",
-    "modified": "2026-06-09"
   },
   {
     "title": "Indian Reasoning and Debating",
@@ -499,44 +446,5 @@
     "audience": "UG/PG",
     "published": "2024-04-09",
     "modified": "2026-06-16"
-  },
-  {
-    "title": "The Science and Art of Music",
-    "slug": "the-science-and-art-of-music",
-    "url": "https://siksha.siddhantaknowledge.org/the-science-and-art-of-music/",
-    "categories": [
-      "Foundation"
-    ],
-    "price": "₹ 2,500.00",
-    "duration": "15 Hours",
-    "audience": "UG/PG",
-    "published": "2024-04-09",
-    "modified": "2026-06-09"
-  },
-  {
-    "title": "Indian Knowledge Systems and Traditions",
-    "slug": "indian-knowledge-systems-and-traditions",
-    "url": "https://siksha.siddhantaknowledge.org/indian-knowledge-systems-and-traditions/",
-    "categories": [
-      "Foundation"
-    ],
-    "price": "₹ 2,500.00",
-    "duration": "15 Hours",
-    "audience": "UG/PG",
-    "published": "2024-04-09",
-    "modified": "2026-06-09"
-  },
-  {
-    "title": "Arthasastra: Indic Science of Governance",
-    "slug": "arthasastra-indic-science-of-governance",
-    "url": "https://siksha.siddhantaknowledge.org/arthasastra-indic-science-of-governance/",
-    "categories": [
-      "Aajivan"
-    ],
-    "price": "$ 10.00",
-    "duration": null,
-    "audience": null,
-    "published": "2024-02-23",
-    "modified": "2026-05-26"
   }
 ]

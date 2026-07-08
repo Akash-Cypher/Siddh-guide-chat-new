@@ -218,6 +218,36 @@ def _extract_course_meta(page_text: str) -> dict:
     return meta
 
 
+def _visible_course_slugs() -> set[str]:
+    """Slugs of products actually shown on the public Siksha shop.
+
+    The WooCommerce shop reflects catalog visibility (it hides upcoming and
+    catalog-excluded products), so it is the source of truth for the count a
+    visitor sees — the REST product list includes hidden ones and over-counts.
+    """
+    slugs: set[str] = set()
+    url = f"{SIKSHA_SITE}/shop/"
+    pages = 0
+    link_re = re.compile(
+        r'href="(https://siksha\.siddhantaknowledge\.org/[a-z0-9\-]+/)"'
+        r'[^>]*class="[^"]*woocommerce-LoopProduct-link'
+    )
+    next_re = re.compile(r'<a[^>]*class="[^"]*next[^"]*"[^>]*href="([^"]+)"')
+
+    while url and pages < 15:
+        page_html = fetch_html(url)
+        pages += 1
+        if not page_html:
+            break
+        for link in link_re.findall(page_html):
+            slugs.add(link.rstrip("/").rsplit("/", 1)[-1])
+        m = next_re.search(page_html)
+        url = html.unescape(m.group(1)) if m else None
+
+    logger.info("crawl: %s catalog-visible course slugs found on shop", len(slugs))
+    return slugs
+
+
 def crawl_courses() -> tuple[list[dict], list[dict]]:
     """Return (website_course_entries, catalog_entries) for live Siksha courses."""
     products: list[dict] = []
@@ -234,6 +264,10 @@ def crawl_courses() -> tuple[list[dict], list[dict]]:
             break
         page += 1
 
+    # Restrict to courses a visitor can actually see in the shop. If the shop
+    # scrape fails we keep all real courses rather than returning nothing.
+    visible_slugs = _visible_course_slugs()
+
     website_entries: list[dict] = []
     catalog: list[dict] = []
     today = date.today().isoformat()
@@ -243,6 +277,9 @@ def crawl_courses() -> tuple[list[dict], list[dict]]:
         title = _clean_text((product.get("title") or {}).get("rendered", ""))
         link = (product.get("link") or "").strip()
         if not slug or not title or not _is_real_course(slug):
+            continue
+        # Only keep courses visible in the public shop (when we have that list).
+        if visible_slugs and slug not in visible_slugs:
             continue
 
         categories = _product_categories(product)

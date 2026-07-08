@@ -197,6 +197,18 @@ COURSE_LIST_PHRASES = [
     "tell me courses",
 ]
 
+# Broader catch-all for "list/show/give all the courses", "what courses are
+# there", "courses available in the website" etc. Plural "courses" only, so a
+# question about one specific course ("show me the Samskrit course") is not
+# swept up here.
+COURSE_LIST_RE = re.compile(
+    r"\b(list|show|display|give|see|view|name)\b[^.?!]{0,25}\bcourses\b"
+    r"|\ball\b[^.?!]{0,15}\bcourses\b"
+    r"|\bcourses\b[^.?!]{0,15}\b(available|list|offered|there|present)\b"
+    r"|\b(what|which)\b[^.?!]{0,15}\bcourses\b",
+    re.IGNORECASE,
+)
+
 COURSE_COUNT_RE = re.compile(
     r"\b(total|count|number|how many)\b.*\b(course|courses|program|programs)\b"
     r"|\b(course|courses|program|programs)\b.*\b(total|count|number|how many)\b"
@@ -461,7 +473,9 @@ def _latest_courses(limit: int = 3) -> list[dict]:
 
 def is_course_list_intent(message: str) -> bool:
     msg = _norm(message).lower()
-    return any(phrase in msg for phrase in COURSE_LIST_PHRASES)
+    if any(phrase in msg for phrase in COURSE_LIST_PHRASES):
+        return True
+    return bool(COURSE_LIST_RE.search(msg))
 
 
 def is_why_choose_siddhanta(message: str) -> bool:
@@ -1676,13 +1690,13 @@ async def chat(
             if not titles:
                 return _refusal_response(session_id, request_id)
 
-            shown = titles[:25]
+            shown = titles[:45]
             more = len(titles) - len(shown)
             answer = (
-                "Here are the available courses:\n\n"
+                f"Here are the {len(titles)} courses currently available on Siksha:\n\n"
                 + "\n".join([f"• {t}" for t in shown])
                 + (f"\n\n…and {more} more." if more > 0 else "")
-                + "\n\nWhich one do you want details for?"
+                + "\n\nWhich one would you like details about?"
             )
 
             put_message(
