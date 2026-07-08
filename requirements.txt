@@ -4,3 +4,5 @@ boto3
 pydantic
 chromadb
 posthog<6
+requests
+beautifulsoup4

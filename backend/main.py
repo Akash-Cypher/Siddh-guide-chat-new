@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -16,7 +17,11 @@ from config import (
     ALLOWED_ORIGINS,
     ALLOW_DEFAULT_SESSION,
     APP_TITLE,
+    AUTO_CRAWL,
     CHAT_API_KEY,
+    CRAWL_ADMIN_KEY,
+    CRAWL_INTERVAL_HOURS,
+    CRAWL_ON_STARTUP,
     ENFORCE_API_KEY,
     FAQ_PATH,
     HISTORY_LIMIT,
@@ -42,6 +47,10 @@ logger = logging.getLogger("siddh_guide")
 faq_data: list[dict] = []
 COURSE_DATA: list[dict] = []
 WEBSITE_DATA: list[dict] = []
+# Live, crawled Siksha course catalog (from data/courses_catalog.json). When
+# populated it is the source of truth for the dynamic course count/list; when
+# empty the code falls back to the static courses.json snapshot.
+COURSE_CATALOG: list[dict] = []
 
 REFUSAL_MESSAGE = (
     "I can help with Siddhanta course and website information. Please ask about "
@@ -195,6 +204,15 @@ COURSE_COUNT_RE = re.compile(
     re.IGNORECASE,
 )
 
+LATEST_COURSE_RE = re.compile(
+    r"\b(latest|newest|most recent|recently (?:launched|added|released|introduced)|"
+    r"just (?:launched|added|released)|new(?:ly)?(?:\s+launched| added)?)\b"
+    r".{0,40}\b(course|courses|program|programs)\b"
+    r"|\b(course|courses|program|programs)\b.{0,40}"
+    r"\b(latest|newest|most recent|recently (?:launched|added|released))\b",
+    re.IGNORECASE,
+)
+
 WHY_CHOOSE_SIDDHANTA_RE = re.compile(
     r"\bwhy\b.*\b(choose|chose|select|study at|study with)\b.*\b(siddhanta|skf|sidh guide|siddh guide)\b"
     r"|\bwhy\b.*\b(siddhanta|skf)\b",
@@ -237,42 +255,95 @@ class ChatRequest(BaseModel):
     session_id: str = Field(..., min_length=1, max_length=SESSION_ID_MAX_LEN)
 
 
+def _load_json_list(path) -> list[dict]:
+    if not path.exists():
+        return []
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except Exception:
+        logger.exception("Failed to load %s", path)
+        return []
+
+
+def _reload_kb_from_disk() -> None:
+    """(Re)load all knowledge-base files into the in-memory globals.
+
+    Used at startup and again after every successful crawl so freshly written
+    data is served without a restart.
+    """
+    global faq_data, COURSE_DATA, WEBSITE_DATA, COURSE_CATALOG
+
+    data_dir = FAQ_PATH.parent
+    faq_data = _load_json_list(FAQ_PATH)
+    COURSE_DATA = _load_json_list(data_dir / "courses.json")
+    WEBSITE_DATA = _load_json_list(data_dir / "website.json")
+    COURSE_CATALOG = _load_json_list(data_dir / "courses_catalog.json")
+    logger.info(
+        "KB loaded: faq=%s courses=%s website=%s live_catalog=%s",
+        len(faq_data),
+        len(COURSE_DATA),
+        len(WEBSITE_DATA),
+        len(COURSE_CATALOG),
+    )
+
+
+def _run_refresh_and_reload() -> dict:
+    """Blocking crawl + re-embed, then reload globals. Runs in a worker thread."""
+    from refresh import refresh_knowledge_base
+
+    summary = refresh_knowledge_base()
+    if summary.get("ok"):
+        _reload_kb_from_disk()
+    return summary
+
+
+async def _crawl_loop() -> None:
+    try:
+        if CRAWL_ON_STARTUP:
+            logger.info("auto-crawl: running initial refresh in background")
+            await asyncio.to_thread(_run_refresh_and_reload)
+
+        interval = max(0, CRAWL_INTERVAL_HOURS) * 3600
+        if interval <= 0:
+            return
+
+        while True:
+            await asyncio.sleep(interval)
+            logger.info("auto-crawl: running scheduled refresh")
+            await asyncio.to_thread(_run_refresh_and_reload)
+    except asyncio.CancelledError:
+        logger.info("auto-crawl: loop cancelled on shutdown")
+        raise
+    except Exception:
+        logger.exception("auto-crawl: loop crashed")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global faq_data, COURSE_DATA, WEBSITE_DATA
-
-    with FAQ_PATH.open("r", encoding="utf-8") as f:
-        faq_data = json.load(f)
-
-    courses_path = FAQ_PATH.parent / "courses.json"
-    if courses_path.exists():
-        try:
-            with courses_path.open("r", encoding="utf-8") as f:
-                COURSE_DATA = json.load(f)
-            logger.info("Loaded %s courses from courses.json", len(COURSE_DATA))
-        except Exception:
-            logger.exception("Failed to load courses.json")
-            COURSE_DATA = []
-    else:
-        logger.warning("courses.json not found in data directory")
-        COURSE_DATA = []
-
-    website_path = FAQ_PATH.parent / "website.json"
-    if website_path.exists():
-        try:
-            with website_path.open("r", encoding="utf-8") as f:
-                WEBSITE_DATA = json.load(f)
-            logger.info("Loaded %s website entries from website.json", len(WEBSITE_DATA))
-        except Exception:
-            logger.exception("Failed to load website.json")
-            WEBSITE_DATA = []
-    else:
-        logger.info("website.json not found in data directory")
-        WEBSITE_DATA = []
-
+    _reload_kb_from_disk()
     init_rag()
-    logger.info("Startup complete: FAQ loaded + RAG initialized + Courses loaded")
-    yield
+    logger.info("Startup complete: KB loaded + RAG initialized")
+
+    crawl_task: Optional[asyncio.Task] = None
+    if AUTO_CRAWL:
+        crawl_task = asyncio.create_task(_crawl_loop())
+        logger.info(
+            "auto-crawl enabled (on_startup=%s interval=%sh)",
+            CRAWL_ON_STARTUP,
+            CRAWL_INTERVAL_HOURS,
+        )
+
+    try:
+        yield
+    finally:
+        if crawl_task is not None:
+            crawl_task.cancel()
+            try:
+                await crawl_task
+            except (asyncio.CancelledError, Exception):
+                pass
 
 
 app = FastAPI(title=APP_TITLE, lifespan=lifespan)
@@ -376,6 +447,16 @@ def _looks_like_followup(message: str) -> bool:
 
 def is_course_count_question(message: str) -> bool:
     return bool(COURSE_COUNT_RE.search(_norm(message).lower()))
+
+
+def is_latest_course_question(message: str) -> bool:
+    return bool(LATEST_COURSE_RE.search(_norm(message).lower()))
+
+
+def _latest_courses(limit: int = 3) -> list[dict]:
+    dated = [c for c in COURSE_CATALOG if (c.get("published") or "").strip()]
+    dated.sort(key=lambda c: c.get("published", ""), reverse=True)
+    return dated[:limit]
 
 
 def is_course_list_intent(message: str) -> bool:
@@ -1063,12 +1144,33 @@ def _website_entry_for_query(message: str) -> Optional[dict]:
         raw_id = "siksha-platform-overview"
     elif re.search(r"\baajivan\b", msg):
         raw_id = "aajivan-overview"
-    elif re.search(r"\bsandhaan\b", msg):
-        raw_id = "sandhaan-technology-overview"
-    elif "siddhanta kosha" in msg:
+    elif re.search(r"\b(prakashan|publication|publications|book|books|astadhyayi|astadhyayi pravesha)\b", msg):
+        raw_id = "prakashan-overview"
+    elif re.search(r"\b(event|events|webinar|webinars|seminar|conference|lecture)\b", msg):
+        raw_id = "events-overview"
+    elif re.search(r"\b(blog|blogs|article|articles|post|posts)\b", msg):
+        raw_id = "blogs-overview"
+    elif re.search(r"\b(siddhanta vijnan|siddhantavijnan|vijnan)\b", msg):
+        raw_id = "siddhantavijnan-overview"
+    # sandhaan / shodha sub-pages must be checked before the generic overviews
+    elif "siddhanta kosha" in msg or "siddhanta kosa" in msg:
         raw_id = "siddhanta-kosha-overview"
     elif "shastra maps" in msg or "shaastra maps" in msg:
         raw_id = "shastra-maps-overview"
+    elif re.search(r"\b(linguistics|vyakarana|mahabhasya)\b", msg):
+        raw_id = "sandhaan-linguistics"
+    elif re.search(r"\b(jyotisha|jyotish|predictive|laghu jatakam)\b", msg) and "sandhaan" in msg:
+        raw_id = "sandhaan-jyotisha"
+    elif re.search(r"\byoga\b", msg) and "sandhaan" in msg:
+        raw_id = "sandhaan-yoga"
+    elif re.search(r"\bsandhaan\b", msg):
+        raw_id = "sandhaan-technology-overview"
+    elif "siddhanta prastuti" in msg or "siddhanta-prastuti" in msg or "prastuti" in msg:
+        raw_id = "shodha-siddhanta-prastuti"
+    elif "indic thought model" in msg or "thought models" in msg:
+        raw_id = "shodha-indic-thought-models"
+    elif "conscious enterprise" in msg or "enterprise management" in msg:
+        raw_id = "shodha-conscious-enterprise-management"
     elif re.search(r"\bshodha\b", msg):
         raw_id = "shodha-research-overview"
     elif "privacy policy" in msg:
@@ -1331,7 +1433,39 @@ def _rag_answer_response(
 
 @app.get("/health")
 def health() -> Dict:
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "courses_live": len(COURSE_CATALOG),
+        "website_entries": len(WEBSITE_DATA),
+        "auto_crawl": AUTO_CRAWL,
+    }
+
+
+def _check_admin_key(x_api_key: Optional[str]) -> None:
+    expected = CRAWL_ADMIN_KEY or CHAT_API_KEY
+    if not expected:
+        raise HTTPException(status_code=500, detail="Admin auth not configured")
+    if x_api_key != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+@app.post("/admin/refresh")
+async def admin_refresh(
+    wait: bool = False,
+    x_api_key: Optional[str] = Header(default=None, alias="x-api-key"),
+) -> Dict:
+    """Manually trigger a live crawl + re-embed (no redeploy needed).
+
+    Runs in the background by default; pass ?wait=1 to block for the summary.
+    """
+    _check_admin_key(x_api_key)
+
+    if wait:
+        summary = await asyncio.to_thread(_run_refresh_and_reload)
+        return {"status": "completed", "summary": summary}
+
+    asyncio.create_task(asyncio.to_thread(_run_refresh_and_reload))
+    return {"status": "refresh_started"}
 
 
 @app.get("/history/{session_id}")
@@ -1434,23 +1568,71 @@ async def chat(
         # context or citations, so they are not trusted as answer sources.
 
         if is_course_count_question(user_message):
-            titles = _unique_course_titles(COURSE_DATA) if COURSE_DATA else []
-            if not titles:
-                return _refusal_response(session_id, request_id)
+            # Prefer the live, crawled Siksha catalog for an accurate count; fall
+            # back to the static courses.json snapshot only when it is absent.
+            if COURSE_CATALOG:
+                count = len(COURSE_CATALOG)
+                answer = (
+                    f"There are {count} courses currently listed on Siddhanta's "
+                    "Siksha platform (siksha.siddhantaknowledge.org)."
+                )
+                sources = ["courses_catalog.json"]
+                citations = ["courses_catalog.json | Siksha live catalog"]
+            else:
+                titles = _unique_course_titles(COURSE_DATA) if COURSE_DATA else []
+                if not titles:
+                    return _refusal_response(session_id, request_id)
+                answer = (
+                    f"There are {len(titles)} courses available in the current "
+                    "Sidh Guide course database."
+                )
+                sources = ["courses.json"]
+                citations = ["courses.json"]
 
-            answer = (
-                f"There are {len(titles)} courses available in the current "
-                "Sidh Guide course database."
-            )
             put_message(
                 session_id=session_id,
                 role="assistant",
                 text=answer,
                 request_id=request_id,
-                sources=["courses.json"],
+                sources=sources,
                 context_used=1,
             )
-            return _response(answer, ["courses.json"], 1, request_id, citations=["courses.json"])
+            return _response(answer, sources, 1, request_id, citations=citations)
+
+        if is_latest_course_question(user_message) and COURSE_CATALOG:
+            newest = _latest_courses(limit=3)
+            if newest:
+                top = newest[0]
+                parts = [
+                    f"The most recently added course on Siddhanta's Siksha platform is "
+                    f"“{top['title']}” (listed {top['published']})."
+                ]
+                if top.get("categories"):
+                    parts.append(f"Category: {', '.join(top['categories'])}.")
+                if top.get("price"):
+                    parts.append(f"Price shown: {top['price']}.")
+                if len(newest) > 1:
+                    parts.append(
+                        "Other recent additions: "
+                        + "; ".join(f"{c['title']} ({c['published']})" for c in newest[1:])
+                        + "."
+                    )
+                answer = " ".join(parts)
+                put_message(
+                    session_id=session_id,
+                    role="assistant",
+                    text=answer,
+                    request_id=request_id,
+                    sources=["courses_catalog.json"],
+                    context_used=1,
+                )
+                return _response(
+                    answer,
+                    ["courses_catalog.json"],
+                    1,
+                    request_id,
+                    citations=["courses_catalog.json | Siksha live catalog"],
+                )
 
         if is_why_choose_siddhanta(user_message):
             answer = get_why_choose_siddhanta_answer()
@@ -1468,23 +1650,38 @@ async def chat(
             return _response(answer, ["faq"], 1, request_id, citations=["faq"])
 
         if is_course_list_intent(user_message):
-            ranked = rank_course_candidates(user_message, COURSE_DATA, limit=20) if COURSE_DATA else []
-            titles = [r["title"] for r in ranked] if ranked else [
-                _extract_primary_title(
-                    (item.get("title") or item.get("course_name") or item.get("name") or "").strip()
-                )
-                for item in COURSE_DATA[:20]
-                if (item.get("title") or item.get("course_name") or item.get("name"))
-            ]
+            # Prefer the live Siksha catalog so the listed courses stay current.
+            if COURSE_CATALOG:
+                titles = [
+                    (c.get("title") or "").strip()
+                    for c in COURSE_CATALOG
+                    if (c.get("title") or "").strip()
+                ]
+                source = "courses_catalog.json"
+                citation = "courses_catalog.json | Siksha live catalog"
+            else:
+                ranked = rank_course_candidates(user_message, COURSE_DATA, limit=20) if COURSE_DATA else []
+                titles = [r["title"] for r in ranked] if ranked else [
+                    _extract_primary_title(
+                        (item.get("title") or item.get("course_name") or item.get("name") or "").strip()
+                    )
+                    for item in COURSE_DATA[:20]
+                    if (item.get("title") or item.get("course_name") or item.get("name"))
+                ]
+                source = "courses.json"
+                citation = "courses.json"
 
             titles = [t for t in titles if t]
 
             if not titles:
                 return _refusal_response(session_id, request_id)
 
+            shown = titles[:25]
+            more = len(titles) - len(shown)
             answer = (
-                "Here are some available courses:\n\n"
-                + "\n".join([f"• {t}" for t in titles[:20]])
+                "Here are the available courses:\n\n"
+                + "\n".join([f"• {t}" for t in shown])
+                + (f"\n\n…and {more} more." if more > 0 else "")
                 + "\n\nWhich one do you want details for?"
             )
 
@@ -1493,15 +1690,15 @@ async def chat(
                 role="assistant",
                 text=answer,
                 request_id=request_id,
-                sources=["courses.json"],
+                sources=[source],
                 context_used=1,
             )
             return _response(
                 answer,
-                ["courses.json"],
+                [source],
                 1,
                 request_id,
-                citations=["courses.json"],
+                citations=[citation],
             )
 
         if is_prompt_injection(user_message):

@@ -75,3 +75,22 @@ RAG_MAX_DISTANCE = float(os.getenv("RAG_MAX_DISTANCE", "0.45"))
 RAG_DEFAULT_K = _get_int("RAG_DEFAULT_K", 3)
 RAG_MAX_CONTEXT_CHARS = _get_int("RAG_MAX_CONTEXT_CHARS", 1500)
 RAG_MAX_CHUNK_CHARS = _get_int("RAG_MAX_CHUNK_CHARS", 500)
+
+# --------------------------------------------------------------------------- #
+# Live crawler / auto-refresh.
+#
+# AUTO_CRAWL is the master switch. It defaults to ON so a plain deploy keeps its
+# knowledge base fresh with no manual steps. To fully revert to the static
+# committed JSON snapshot, set AUTO_CRAWL=0 in the deploy environment (instant,
+# no code change) or revert the crawler commit.
+# --------------------------------------------------------------------------- #
+AUTO_CRAWL = _get_bool("AUTO_CRAWL", True)
+# Crawl once shortly after startup (runs in the background, never blocks boot).
+CRAWL_ON_STARTUP = _get_bool("CRAWL_ON_STARTUP", True)
+# Re-crawl on this cadence while the app runs. 0 disables the periodic loop.
+CRAWL_INTERVAL_HOURS = _get_int("CRAWL_INTERVAL_HOURS", 24)
+# Re-embed into Chroma after each successful crawl (needs Bedrock/Titan access).
+CRAWL_REBUILD_INDEX = _get_bool("CRAWL_REBUILD_INDEX", True)
+# Optional secret to protect the manual POST /admin/refresh trigger. Falls back
+# to CHAT_API_KEY when unset.
+CRAWL_ADMIN_KEY = os.getenv("CRAWL_ADMIN_KEY", "").strip()

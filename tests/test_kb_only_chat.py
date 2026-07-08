@@ -25,6 +25,7 @@ def isolated_backend(monkeypatch):
     monkeypatch.setattr(main, "faq_data", [])
     monkeypatch.setattr(main, "COURSE_DATA", [])
     monkeypatch.setattr(main, "WEBSITE_DATA", [])
+    monkeypatch.setattr(main, "COURSE_CATALOG", [])
     monkeypatch.setattr(main, "get_recent_messages", lambda *args, **kwargs: [])
     monkeypatch.setattr(main, "history_to_model_messages", lambda *args, **kwargs: [])
     monkeypatch.setattr(main, "put_message", lambda *args, **kwargs: None)
@@ -113,6 +114,98 @@ def test_course_count_returns_local_count_without_model(client, monkeypatch):
     assert data["status"] == "ok"
     assert "2 courses" in data["answer"]
     assert data["citations"] == ["courses.json"]
+
+
+def test_course_count_prefers_live_catalog(client, monkeypatch):
+    # When the crawled live catalog is present it is the source of truth.
+    monkeypatch.setattr(
+        main,
+        "COURSE_CATALOG",
+        [{"title": f"Course {i}", "slug": f"c{i}"} for i in range(38)],
+    )
+    monkeypatch.setattr(
+        main,
+        "COURSE_DATA",
+        [{"title": "Stale Snapshot Course", "content": "x"}],
+    )
+    monkeypatch.setattr(main, "generate_answer", no_model_call)
+
+    response = post_chat(client, "how many courses are there")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "ok"
+    assert "38 courses" in data["answer"]
+    assert "siksha" in data["answer"].lower()
+    assert data["citations"] == ["courses_catalog.json | Siksha live catalog"]
+
+
+def test_latest_course_answers_from_catalog_dates(client, monkeypatch):
+    monkeypatch.setattr(
+        main,
+        "COURSE_CATALOG",
+        [
+            {"title": "Old Course", "published": "2025-01-01", "categories": [], "price": None},
+            {"title": "Brand New Course", "published": "2026-07-06", "categories": ["Arts"], "price": "Rs. 2,500.00"},
+        ],
+    )
+    monkeypatch.setattr(main, "generate_answer", no_model_call)
+
+    response = post_chat(client, "what is the latest course launched")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "ok"
+    assert "Brand New Course" in data["answer"]
+    assert "2026-07-06" in data["answer"]
+    assert data["citations"] == ["courses_catalog.json | Siksha live catalog"]
+
+
+def test_course_list_uses_live_catalog_titles(client, monkeypatch):
+    monkeypatch.setattr(
+        main,
+        "COURSE_CATALOG",
+        [
+            {"title": "Applied Ayurveda", "slug": "a"},
+            {"title": "Indian Design Thinking", "slug": "b"},
+        ],
+    )
+    monkeypatch.setattr(main, "generate_answer", no_model_call)
+
+    response = post_chat(client, "give me the list of courses")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "ok"
+    assert "Applied Ayurveda" in data["answer"]
+    assert "Indian Design Thinking" in data["answer"]
+    assert data["citations"] == ["courses_catalog.json | Siksha live catalog"]
+
+
+def test_newly_crawled_blog_page_answers_from_website_data(client, monkeypatch):
+    monkeypatch.setattr(
+        main,
+        "WEBSITE_DATA",
+        [
+            {
+                "id": "blogs-overview",
+                "title": "Siddhanta Blogs",
+                "source_url": "https://siddhantaknowledge.org/blogs/",
+                "category": "blog",
+                "keywords": ["blog", "blogs"],
+                "content": "The Siddhanta blog currently lists 15 recent posts about IKS topics.",
+            }
+        ],
+    )
+    monkeypatch.setattr(main, "generate_answer", no_model_call)
+
+    response = post_chat(client, "show me the blogs")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "ok"
+    assert "posts" in data["answer"].lower()
+    assert data["citations"] == ["website.json | Siddhanta Blogs"]
 
 
 def test_why_choose_siddhanta_uses_existing_faq_without_model(client, monkeypatch):
