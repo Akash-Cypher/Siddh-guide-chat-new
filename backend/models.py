@@ -38,7 +38,10 @@ def _build_system_prompt(context: str) -> str:
         "is referring to (e.g. 'it', 'that course', 'tell me more'). Still answer "
         "only from the Sidh Guide context below, never from the conversation itself.\n"
         "- Do not answer general knowledge, politics, current affairs, personal questions, coding help, entertainment, medical, legal, finance, device recommendations, or unrelated questions unless the context contains the answer.\n"
-        "- Keep responses short, direct, and grounded in the context.\n"
+        "- Be helpful and natural: synthesise across the context chunks, and when "
+        "the user asks how to do something (enrol, access a course, contact, pay) "
+        "and the context explains it, give clear step-by-step guidance.\n"
+        "- Keep responses direct and grounded in the context; do not pad.\n"
         "- Do not invent course names, fees, eligibility, dates, people, or promises.\n\n"
         f"Sidh Guide context:\n{context.strip()}"
     )
@@ -84,7 +87,7 @@ def generate_answer(
         "messages": messages,
         "system": [{"text": _build_system_prompt(context)}],
         "inferenceConfig": {
-            "maxTokens": 160,
+            "maxTokens": 400,
             "temperature": 0.2,
             "topP": 0.9,
         },

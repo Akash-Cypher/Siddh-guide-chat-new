@@ -620,7 +620,9 @@ def _term_matches_context(term: str, context_tokens: set[str], context_text: str
 def _context_is_relevant(question: str, context_text: str) -> bool:
     terms = _validation_terms(question)
     if not terms:
-        return False
+        # No content terms (e.g. "how do I do this?") — the vector-distance gate
+        # already established similarity, so trust it rather than refuse.
+        return True
 
     context_text = (context_text or "").lower()
     context_tokens = set(re.findall(r"[a-z0-9]+", context_text))
@@ -631,10 +633,13 @@ def _context_is_relevant(question: str, context_text: str) -> bool:
         # contains the key topic terms; loose semantic similarity is not enough.
         return len(matched) == len(terms)
 
-    if len(terms) <= 2:
-        return len(matched) == len(terms)
-
-    return len(matched) >= 2 and (len(matched) / len(terms)) >= 0.35
+    # In-domain: the retrieval distance threshold (RAG_MAX_DISTANCE) already
+    # gated semantic similarity, and the model is instructed to answer only from
+    # this context (and every answer is re-validated against it). So require just
+    # a light keyword overlap to drop obviously-unrelated chunks, and otherwise
+    # trust the embeddings. This lets natural phrasings ("how can I access the
+    # courses") match KB text that words it differently ("Click To Enroll").
+    return len(matched) >= 1
 
 
 def _validate_retrieved_hits(question: str, hits: list[dict]) -> list[dict]:
@@ -1510,14 +1515,41 @@ def _refusal_response(session_id: str, request_id: str) -> Dict:
     )
 
 
+def _retrieval_query(user_message: str, recent_messages: Optional[list[dict]] = None) -> str:
+    """Build the text used for vector retrieval.
+
+    A bare follow-up ("how much is it?", "who is it for?") carries no topic on
+    its own, so it retrieves nothing. When the current turn looks like a
+    follow-up, anchor it with the most recent user question so retrieval lands on
+    the course/topic under discussion. Fresh, self-contained questions are used
+    as-is so old context never pollutes them. This replaces the old regex
+    follow-up router with a standard history-aware retriever.
+    """
+    if not recent_messages or not is_followup_about_previous(user_message):
+        return user_message
+
+    for m in reversed(recent_messages):
+        if (m.get("role") or "").strip().lower() != "user":
+            continue
+        prev = (m.get("text") or "").strip()
+        if prev and prev.lower() != user_message.lower():
+            return f"{prev}. {user_message}"
+
+    return user_message
+
+
 def _rag_answer_response(
     user_message: str,
     history_messages: list[dict],
     session_id: str,
     request_id: str,
+    recent_messages: Optional[list[dict]] = None,
 ) -> Dict:
+    # Retrieve against a history-aware query so follow-ups resolve, but always
+    # answer the user's actual message.
+    query = _retrieval_query(user_message, recent_messages)
     context, citations = _retrieve_validated_context(
-        user_message,
+        query,
         k=RAG_DEFAULT_K,
         max_chars=RAG_MAX_CONTEXT_CHARS,
         max_chunk_chars=RAG_MAX_CHUNK_CHARS,
@@ -1750,21 +1782,6 @@ async def chat(
                     citations=["courses_catalog.json | Siksha live catalog"],
                 )
 
-        if is_why_choose_siddhanta(user_message):
-            answer = get_why_choose_siddhanta_answer()
-            if not answer:
-                return _refusal_response(session_id, request_id)
-
-            put_message(
-                session_id=session_id,
-                role="assistant",
-                text=answer,
-                request_id=request_id,
-                sources=["faq"],
-                context_used=1,
-            )
-            return _response(answer, ["faq"], 1, request_id, citations=["faq"])
-
         if is_course_list_intent(user_message):
             # Prefer the live Siksha catalog so the listed courses stay current.
             if COURSE_CATALOG:
@@ -1820,248 +1837,19 @@ async def chat(
         if is_prompt_injection(user_message):
             return _refusal_response(session_id, request_id)
 
-        if is_out_of_domain_query(user_message):
-            return _rag_answer_response(user_message, history_messages, session_id, request_id)
-
-        website_answer = get_website_answer(user_message)
-        if website_answer:
-            # KB-only enforcement: common website/policy/enrollment questions are
-            # answered directly from website.json so short queries do not fall
-            # through to a general model answer or weak vector match.
-            answer, citations = website_answer
-            put_message(
-                session_id=session_id,
-                role="assistant",
-                text=answer,
-                request_id=request_id,
-                sources=["website.json"],
-                context_used=1,
-            )
-            return _response(answer, ["website.json"], 1, request_id, citations=citations)
-
-        faq_answer = get_faq_answer(user_message)
-        if faq_answer:
-            put_message(
-                session_id=session_id,
-                role="assistant",
-                text=faq_answer,
-                request_id=request_id,
-                sources=["faq"],
-                context_used=0,
-            )
-            return _response(faq_answer, ["faq"], 0, request_id, citations=["faq"])
-
-        # Conversational continuity: a bare follow-up ("how much is it?", "who is
-        # it for?", "tell me more") is resolved against the last course discussed
-        # in this session, so the thread is kept instead of refused. Only fires
-        # for genuine follow-ups that do not name a course themselves.
-        if (
-            USE_HISTORY_FOR_CONTINUITY
-            and has_prior_history
-            and (WEBSITE_DATA or COURSE_DATA)
-            and is_followup_about_previous(user_message)
-        ):
-            ref = _last_course_context_from_history(recent_before)
-            if ref:
-                context, citations = ref
-                answer, supported = _generated_answer_or_refusal(
-                    user_message=(
-                        "The user is continuing to ask about the course in the "
-                        "provided context.\n"
-                        f"Follow-up question: {user_message}\n"
-                        "Answer only from the provided course record. If the "
-                        "specific detail is not shown, say the website does not "
-                        "list that detail for this course."
-                    ),
-                    context=context,
-                    citations=citations,
-                    history_messages=history_messages,
-                )
-                if supported:
-                    source = (
-                        ["website.json", "nova"]
-                        if citations and citations[0].startswith("website.json")
-                        else ["courses.json", "nova"]
-                    )
-                    put_message(
-                        session_id=session_id,
-                        role="assistant",
-                        text=answer,
-                        request_id=request_id,
-                        sources=source,
-                        context_used=1,
-                    )
-                    return _response(answer, source, 1, request_id, citations=citations)
-
-        if COURSE_DATA:
-            course_in_message = find_course_title_in_message(user_message, COURSE_DATA)
-            if course_in_message:
-                context, citations = _course_context_for_title(course_in_message["title"], COURSE_DATA)
-                if not context or not citations:
-                    return _refusal_response(session_id, request_id)
-
-                answer, supported = _generated_answer_or_refusal(
-                    user_message=(
-                        f"The user asked about this course: {course_in_message['display_title']}.\n"
-                        f"User question: {user_message}\n"
-                        "Answer only from the provided course records. If the question asks "
-                        "for jobs, placements, devices, enrollment, or other details not "
-                        "present in the course records, say the KB does not contain that information."
-                    ),
-                    context=context,
-                    citations=citations,
-                    history_messages=history_messages,
-                )
-                if not supported:
-                    return _refusal_response(session_id, request_id)
-
-                put_message(
-                    session_id=session_id,
-                    role="assistant",
-                    text=answer,
-                    request_id=request_id,
-                    sources=["courses.json", "nova"],
-                    context_used=1,
-                )
-                return _response(answer, ["courses.json", "nova"], 1, request_id, citations=citations)
-
-            exact_course = find_exact_course_title_match(user_message, COURSE_DATA)
-            if exact_course:
-                context = (
-                    f"[source=courses.json]\n"
-                    f"Title: {exact_course['title']}\n"
-                    f"Content: {exact_course['content']}"
-                )
-                citations = [f"courses.json | {exact_course['title']}"]
-
-                answer, supported = _generated_answer_or_refusal(
-                    user_message=(
-                        f"The user selected this course title: {exact_course['display_title']}. "
-                        "Give a short and direct overview based only on the provided course content. "
-                        "If available, mention what the course covers, who it suits, and key themes."
-                    ),
-                    context=context,
-                    citations=citations,
-                    history_messages=history_messages,
-                )
-
-                if not supported:
-                    return _refusal_response(session_id, request_id)
-
-                put_message(
-                    session_id=session_id,
-                    role="assistant",
-                    text=answer,
-                    request_id=request_id,
-                    sources=["courses.json", "nova"],
-                    context_used=1,
-                )
-                return _response(answer, ["courses.json", "nova"], 1, request_id, citations=citations)
-
-        if is_course_outcome_or_career_query(user_message):
-            return _rag_answer_response(user_message, history_messages, session_id, request_id)
-
-        if is_procedural_query(user_message):
-            return _rag_answer_response(user_message, history_messages, session_id, request_id)
-
-        if is_course_recommendation_intent(user_message):
-            ranked = rank_course_candidates(user_message, COURSE_DATA, limit=8) if COURSE_DATA else []
-
-            if len(ranked) < 3:
-                hits = _validate_retrieved_hits(user_message, retrieve_hits(user_message, k=8))
-                seen_titles = {r["title"].lower() for r in ranked}
-
-                for hit in hits:
-                    title = (hit.get("title") or "").strip()
-                    if not title:
-                        first_line = hit.get("document", "").splitlines()[0].strip()
-                        if 4 <= len(first_line) <= 120:
-                            title = first_line
-
-                    title = _extract_primary_title(title)
-                    if title and title.lower() not in seen_titles:
-                        ranked.append(
-                            {
-                                "title": title,
-                                "raw_title": title,
-                                "content": hit.get("document") or "",
-                                "score": 1,
-                            }
-                        )
-                        seen_titles.add(title.lower())
-
-                    if len(ranked) >= 8:
-                        break
-
-            if ranked:
-                if wants_single_recommendation(user_message) or len(ranked) == 1:
-                    top = ranked[0]
-                    context = f"[source=courses.json]\nTitle: {top['title']}\nContent: {top['content']}"
-                    citations = [f"courses.json | {top['title']}"]
-                    answer, supported = _generated_answer_or_refusal(
-                        user_message=(
-                            f"The user asked: {user_message}\n"
-                            "Recommend only the single best-fit course from the provided context "
-                            "and explain briefly why it suits the user."
-                        ),
-                        context=context,
-                        citations=citations,
-                        history_messages=history_messages,
-                    )
-                    if not supported:
-                        return _refusal_response(session_id, request_id)
-
-                    put_message(
-                        session_id=session_id,
-                        role="assistant",
-                        text=answer,
-                        request_id=request_id,
-                        sources=["courses.json", "nova"],
-                        context_used=1,
-                    )
-                    return _response(answer, ["courses.json", "nova"], 1, request_id, citations=citations)
-
-                if wants_course_details(user_message):
-                    top = ranked[0]
-                    context = f"[source=courses.json]\nTitle: {top['title']}\nContent: {top['content']}"
-                    citations = [f"courses.json | {top['title']}"]
-                    answer, supported = _generated_answer_or_refusal(
-                        user_message=user_message,
-                        context=context,
-                        citations=citations,
-                        history_messages=history_messages,
-                    )
-                    if not supported:
-                        return _refusal_response(session_id, request_id)
-
-                    put_message(
-                        session_id=session_id,
-                        role="assistant",
-                        text=answer,
-                        request_id=request_id,
-                        sources=["courses.json", "nova"],
-                        context_used=1,
-                    )
-                    return _response(answer, ["courses.json", "nova"], 1, request_id, citations=citations)
-
-                answer = (
-                    "Here are some relevant courses:\n"
-                    + "\n".join([f"- {r['title']}" for r in ranked[:5]])
-                    + "\n\nWhich one do you want details for?"
-                )
-                put_message(
-                    session_id=session_id,
-                    role="assistant",
-                    text=answer,
-                    request_id=request_id,
-                    sources=["courses.json"],
-                    context_used=1,
-                )
-                return _response(answer, ["courses.json"], 1, request_id, citations=["courses.json"])
-
-            return _refusal_response(session_id, request_id)
-
-        return _rag_answer_response(user_message, history_messages, session_id, request_id)
+        # RAG-first: every remaining question is answered by retrieving the most
+        # relevant knowledge-base content and letting the model write a grounded,
+        # cited answer — or refuse if nothing relevant is found. Retrieval is
+        # history-aware, so a follow-up ("how much is it?") resolves against the
+        # course under discussion. This replaces the old maze of keyword/intent
+        # routers that mis-classified natural questions.
+        return _rag_answer_response(
+            user_message,
+            history_messages,
+            session_id,
+            request_id,
+            recent_messages=recent_before,
+        )
 
     except HTTPException:
         raise
