@@ -399,13 +399,20 @@ def test_faq_multiword_no_false_substring(monkeypatch):
 
 
 def test_course_job_claim_not_supported_is_refused(client, monkeypatch):
+    # RAG retrieves the course context, but the model's job claim is not supported
+    # by it, so the answer must be refused (grounding guard).
     monkeypatch.setattr(
         main,
-        "COURSE_DATA",
-        [
+        "retrieve_hits",
+        lambda *a, **k: [
             {
-                "title": "IKS Perspectives on Sustainability: Agriculture — Objectives & Outcomes",
-                "content": "Course Outcome: Learners understand sustainable Indian farming techniques.",
+                "document": (
+                    "Course title: IKS Perspectives on Sustainability: Agriculture. "
+                    "Course Outcome: Learners understand sustainable Indian farming techniques."
+                ),
+                "source": "courses.json",
+                "title": "IKS Perspectives on Sustainability: Agriculture",
+                "distance": 0.05,
             }
         ],
     )
