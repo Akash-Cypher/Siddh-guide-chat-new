@@ -84,6 +84,28 @@ def _make_unique_id(filename: str, raw_id: Optional[str], i: int) -> str:
     return f"{file_key}::{base}::{i}"
 
 
+def _enrich_for_embedding(title: str, keywords, content: str) -> str:
+    """Prepend the curated title + keywords to the content before embedding.
+
+    Retrieval matches the *embedding* of this text. Entries carry hand-written
+    keywords (e.g. enrollment-overview -> "how to enroll", "click to enroll")
+    that describe the questions they answer, but embedding content alone misses
+    them, so short intent questions land too far away. Including title + keywords
+    pulls those questions close to the right entry.
+    """
+    parts = []
+    if title:
+        parts.append(title.strip())
+    if isinstance(keywords, list):
+        kw = " ".join(str(k).strip() for k in keywords if str(k).strip())
+        if kw:
+            parts.append(kw)
+    elif isinstance(keywords, str) and keywords.strip():
+        parts.append(keywords.strip())
+    parts.append((content or "").strip())
+    return "\n".join(p for p in parts if p).strip()
+
+
 def build_index_from_json_folder(json_folder: str = "data") -> None:
     collection = _get_collection()
 
@@ -108,9 +130,13 @@ def build_index_from_json_folder(json_folder: str = "data") -> None:
         if isinstance(data, list):
             for i, item in enumerate(data):
                 if isinstance(item, dict):
-                    content = item.get("content") or item.get("answer") or json.dumps(item, ensure_ascii=False)
+                    base_content = item.get("content") or item.get("answer") or json.dumps(item, ensure_ascii=False)
                     raw_id = item.get("id")
                     title = (item.get("title") or "").strip()
+                    # Embed the curated title + keywords alongside the content so
+                    # short intent questions ("how do I enroll") match entries
+                    # whose keywords already say "how to enroll" / "enrollment".
+                    content = _enrich_for_embedding(title, item.get("keywords"), base_content)
                 else:
                     content = json.dumps(item, ensure_ascii=False)
                     raw_id = None
@@ -127,9 +153,10 @@ def build_index_from_json_folder(json_folder: str = "data") -> None:
                 docs.append((doc_id, content, meta))
 
         elif isinstance(data, dict):
-            content = json.dumps(data, ensure_ascii=False)
+            base_content = data.get("content") or data.get("answer") or json.dumps(data, ensure_ascii=False)
             raw_id = data.get("id") if isinstance(data.get("id"), str) else None
             title = (data.get("title") or "").strip()
+            content = _enrich_for_embedding(title, data.get("keywords"), base_content)
             doc_id = _make_unique_id(filename, raw_id, 0)
 
             bump = 1
