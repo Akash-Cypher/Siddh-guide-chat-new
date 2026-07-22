@@ -292,6 +292,60 @@ def test_followup_without_history_is_not_hijacked(client, monkeypatch):
     assert response.json()["status"] == "refused"
 
 
+def test_followup_continues_website_course(client, monkeypatch):
+    """Production shape: per-course facts live in website.json (courses.json uses
+    a differently-formatted title), so continuity must resolve via website.json."""
+    monkeypatch.setattr(
+        main,
+        "WEBSITE_DATA",
+        [
+            {
+                "id": "course-samskrit-1-thinking-in-samskrit",
+                "title": "Samskrit 1: Thinking in Samskrit",
+                "category": "course",
+                "keywords": ["Samskrit 1: Thinking in Samskrit", "Samskrit", "Foundation"],
+                "content": (
+                    "Course title: Samskrit 1: Thinking in Samskrit. Duration: 30 Hours. "
+                    "Price shown: Rs. 2,500.00."
+                ),
+            }
+        ],
+    )
+    # courses.json carries a DIFFERENT title format — it must not be the resolver.
+    monkeypatch.setattr(
+        main,
+        "COURSE_DATA",
+        [{"title": "Sanskrit I - Thinking in Samskrit — Overview", "content": "x"}],
+    )
+    monkeypatch.setattr(
+        main,
+        "get_recent_messages",
+        lambda *a, **k: [
+            {"role": "user", "text": "tell me about Samskrit 1"},
+            {
+                "role": "assistant",
+                "text": (
+                    "Samskrit 1: Thinking in Samskrit is listed as a Sidh Guide/Siksha "
+                    "course. Duration: 30 Hours. Visible price: Rs. 2,500.00."
+                ),
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        main,
+        "generate_answer",
+        lambda **kw: "The Samskrit 1 course runs 30 Hours and the price shown is Rs. 2,500.00.",
+    )
+
+    response = post_chat(client, "how much is it?")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "ok"
+    assert "2,500" in data["answer"]
+    assert data["citations"] == ["website.json | Samskrit 1: Thinking in Samskrit"]
+
+
 # --------------------------------------------------------------------------- #
 # Answer-routing fixes: generic-keyword collision + FAQ natural phrasing.
 # --------------------------------------------------------------------------- #

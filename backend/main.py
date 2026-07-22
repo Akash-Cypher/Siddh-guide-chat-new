@@ -1013,35 +1013,42 @@ def is_followup_about_previous(message: str) -> bool:
     return has_attr or (has_pronoun and len(words) <= 5)
 
 
-def _last_course_title_from_history(messages: list[dict]) -> Optional[str]:
-    """The most recent course the conversation was about, scanning newest-first.
+def _last_course_context_from_history(messages: list[dict]) -> Optional[tuple[str, list[str]]]:
+    """(context, citations) for the most recent course discussed, newest-first.
 
-    Prefers the course an assistant turn answered about (its reply opens with
-    "<Title> is listed as a Sidh Guide/Siksha course"), then falls back to any
-    course title named in an earlier turn.
+    Live per-course facts live in website.json (titles like
+    "Samskrit 1: Thinking in Samskrit"). courses.json uses different titles
+    ("Sanskrit I - Thinking in Samskrit — Overview") that do not match the
+    website-sourced answers, so it is only a fallback. Returns the same
+    (context, citations) shape the rest of the pipeline uses.
     """
-    if not COURSE_DATA:
-        return None
-
     for m in reversed(messages or []):
         text = (m.get("text") or "").strip()
         if not text:
             continue
 
-        if (m.get("role") or "").strip().lower() == "assistant":
-            mo = _LISTED_AS_COURSE_RE.match(text)
-            if mo:
-                cand = mo.group(1).strip()
-                match = (
-                    find_exact_course_title_match(cand, COURSE_DATA)
-                    or find_course_title_in_message(cand, COURSE_DATA)
-                )
-                if match:
-                    return match["title"]
+        # Preferred: the website course entry this turn was about (matches both a
+        # user question naming the course and the assistant reply that echoes the
+        # full title).
+        if WEBSITE_DATA:
+            entry = _website_course_entry_in_message(text)
+            content = (entry.get("content") or "").strip() if entry else ""
+            if entry and content:
+                title = (entry.get("title") or "").strip()
+                content = content[:RAG_MAX_CONTEXT_CHARS]
+                context = f"[source=website.json | {title}]\nTitle: {title}\nContent: {content}"
+                return context, [f"website.json | {title}"]
 
-        match = find_course_title_in_message(text, COURSE_DATA)
-        if match:
-            return match["title"]
+        # Fallback: courses.json.
+        if COURSE_DATA:
+            match = (
+                find_course_title_in_message(text, COURSE_DATA)
+                or find_exact_course_title_match(text, COURSE_DATA)
+            )
+            if match:
+                context, citations = _course_context_for_title(match["title"], COURSE_DATA)
+                if context and citations:
+                    return context, citations
 
     return None
 
@@ -1851,42 +1858,40 @@ async def chat(
         if (
             USE_HISTORY_FOR_CONTINUITY
             and has_prior_history
-            and COURSE_DATA
+            and (WEBSITE_DATA or COURSE_DATA)
             and is_followup_about_previous(user_message)
         ):
-            prev_title = _last_course_title_from_history(recent_before)
-            if prev_title:
-                context, citations = _course_context_for_title(prev_title, COURSE_DATA)
-                if context and citations:
-                    answer, supported = _generated_answer_or_refusal(
-                        user_message=(
-                            f"The user is still asking about the course "
-                            f"'{_extract_primary_title(prev_title)}'.\n"
-                            f"Follow-up question: {user_message}\n"
-                            "Answer only from the provided course records. If the "
-                            "specific detail is not shown, say the website does not "
-                            "list that detail for this course."
-                        ),
-                        context=context,
-                        citations=citations,
-                        history_messages=history_messages,
+            ref = _last_course_context_from_history(recent_before)
+            if ref:
+                context, citations = ref
+                answer, supported = _generated_answer_or_refusal(
+                    user_message=(
+                        "The user is continuing to ask about the course in the "
+                        "provided context.\n"
+                        f"Follow-up question: {user_message}\n"
+                        "Answer only from the provided course record. If the "
+                        "specific detail is not shown, say the website does not "
+                        "list that detail for this course."
+                    ),
+                    context=context,
+                    citations=citations,
+                    history_messages=history_messages,
+                )
+                if supported:
+                    source = (
+                        ["website.json", "nova"]
+                        if citations and citations[0].startswith("website.json")
+                        else ["courses.json", "nova"]
                     )
-                    if supported:
-                        put_message(
-                            session_id=session_id,
-                            role="assistant",
-                            text=answer,
-                            request_id=request_id,
-                            sources=["courses.json", "nova"],
-                            context_used=1,
-                        )
-                        return _response(
-                            answer,
-                            ["courses.json", "nova"],
-                            1,
-                            request_id,
-                            citations=citations,
-                        )
+                    put_message(
+                        session_id=session_id,
+                        role="assistant",
+                        text=answer,
+                        request_id=request_id,
+                        sources=source,
+                        context_used=1,
+                    )
+                    return _response(answer, source, 1, request_id, citations=citations)
 
         if COURSE_DATA:
             course_in_message = find_course_title_in_message(user_message, COURSE_DATA)

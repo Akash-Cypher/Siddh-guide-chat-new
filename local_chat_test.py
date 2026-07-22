@@ -15,6 +15,7 @@ Uses only the Python standard library — nothing to install.
 """
 
 import json
+import sys
 import uuid
 import urllib.request
 import urllib.error
@@ -120,8 +121,15 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    # Windows consoles default to cp1252 and choke on non-ASCII; force UTF-8 so
+    # the banner never crashes the server before it starts.
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
     print("\n  Siddh Guide local test console")
     print(f"  Talking to: {BACKEND_URL}")
-    print(f"\n  ▶ Open this in your browser:  http://localhost:{PORT}\n")
+    print(f"\n  >> Open this in your browser:  http://localhost:{PORT}\n")
     print("  Press Ctrl+C to stop.\n")
     ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
