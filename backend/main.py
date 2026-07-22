@@ -1837,6 +1837,25 @@ async def chat(
         if is_prompt_injection(user_message):
             return _refusal_response(session_id, request_id)
 
+        # Curated FAQ layer: a small set of common, stable questions (enrollment,
+        # contact, pricing, certificates, org facts) answered deterministically
+        # from faq.json. Short intent questions like "how do I enroll" sit right
+        # at the RAG retrieval borderline and flicker; the curated FAQ makes them
+        # reliable. Course questions carry none of these keywords, so they fall
+        # through to RAG unchanged — this is a thin FAQ+RAG hybrid, not the old
+        # brittle keyword-routing maze.
+        faq_answer = get_faq_answer(user_message)
+        if faq_answer:
+            put_message(
+                session_id=session_id,
+                role="assistant",
+                text=faq_answer,
+                request_id=request_id,
+                sources=["faq"],
+                context_used=0,
+            )
+            return _response(faq_answer, ["faq"], 0, request_id, citations=["faq"])
+
         # RAG-first: every remaining question is answered by retrieving the most
         # relevant knowledge-base content and letting the model write a grounded,
         # cited answer — or refuse if nothing relevant is found. Retrieval is

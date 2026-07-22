@@ -398,6 +398,51 @@ def test_faq_multiword_no_false_substring(monkeypatch):
     assert main.get_faq_answer("who are you") == "ABOUT BOT"
 
 
+def test_curated_faq_answers_before_rag(client, monkeypatch):
+    """A curated procedural question is answered deterministically from faq.json
+    (reliable), while a course question with faq loaded still goes to RAG."""
+    monkeypatch.setattr(
+        main,
+        "faq_data",
+        [{"keywords": ["how do i enroll", "enroll in a course"], "answer": "Use the Click To Enroll button."}],
+    )
+    monkeypatch.setattr(main, "COURSE_DATA", [])
+    # retrieve_hits must NOT be called for the FAQ hit; if it were, this would blow up.
+    monkeypatch.setattr(main, "retrieve_hits", no_model_call)
+    monkeypatch.setattr(main, "generate_answer", no_model_call)
+
+    resp = post_chat(client, "how do I enroll")
+    data = resp.json()
+    assert data["status"] == "ok"
+    assert data["citations"] == ["faq"]
+    assert "Click To Enroll" in data["answer"]
+
+
+def test_course_question_still_reaches_rag_with_faq_loaded(client, monkeypatch):
+    """A course question carries no FAQ keyword, so it must fall through to RAG
+    even when the curated FAQ layer is loaded."""
+    monkeypatch.setattr(
+        main,
+        "faq_data",
+        [{"keywords": ["how do i enroll", "enroll in a course"], "answer": "Use the Click To Enroll button."}],
+    )
+    monkeypatch.setattr(main, "COURSE_DATA", [])
+    monkeypatch.setattr(
+        main,
+        "retrieve_hits",
+        lambda *a, **k: [
+            {"document": "Ayush: The Indian Wellness System. Duration 30 Hours.",
+             "source": "website.json", "title": "Ayush: The Indian Wellness System", "distance": 0.1}
+        ],
+    )
+    monkeypatch.setattr(main, "generate_answer", lambda **kw: "Ayush covers Ayurveda over 30 Hours.")
+
+    resp = post_chat(client, "what does the Ayush course cover?")
+    data = resp.json()
+    assert data["status"] == "ok"
+    assert data["citations"] == ["website.json | Ayush: The Indian Wellness System"]
+
+
 def test_course_job_claim_not_supported_is_refused(client, monkeypatch):
     # RAG retrieves the course context, but the model's job claim is not supported
     # by it, so the answer must be refused (grounding guard).

@@ -16,8 +16,37 @@
     "answer": "The price for each course varies. You can find detailed pricing information on the specific course page on our website. For the courses I have information about, please ask about a specific course."
   },
   {
-    "keywords": ["login", "lms", "issue", "problem", "access"],
+    "keywords": ["login", "lms", "issue", "problem"],
     "answer": "For any issues with your Learning Management System (LMS) login or access, please contact our support team at lmsadmin@srisiddhanta.org. They will be happy to assist you."
+  },
+  {
+    "keywords": [
+      "how to enroll", "how do i enroll", "how can i enroll", "how do i enrol",
+      "enroll in a course", "enroll", "enrolment", "enrollment",
+      "how to access the courses", "how can i access the courses", "access the courses",
+      "how to join a course", "join a course", "sign up", "register for a course", "how to register"
+    ],
+    "answer": "To enroll in a course, open the course page on the Siksha platform (siksha.siddhantaknowledge.org) and use the “Click To Enroll” button shown near the course price. You can also browse courses using the Join A Course, Explore, Read More and View All links on the website. If you need help during enrollment or LMS access, email lmsadmin@srisiddhanta.org."
+  },
+  {
+    "keywords": [
+      "how to contact", "how do i contact", "how can i contact", "contact you",
+      "contact siddhanta", "get in touch", "reach you", "reach out", "contact details",
+      "contact information", "customer support", "help desk", "support email"
+    ],
+    "answer": "You can reach Siddhanta Knowledge Foundation through the Contact page form on the website, which has Name, Email, and Comment/Message fields. For Learning Management System (LMS) login or access issues, email the support team at lmsadmin@srisiddhanta.org."
+  },
+  {
+    "keywords": ["certificate", "certification", "will i get a certificate", "will i receive a certificate", "receive a certificate", "get a certificate", "is there a certificate", "provide a certificate", "do you provide certificate", "course certificate"],
+    "answer": "Whether a certificate is provided is shown on the individual course page. Please check the specific course page for the course you are interested in, or contact the support team at lmsadmin@srisiddhanta.org for confirmation."
+  },
+  {
+    "keywords": ["ministry of education", "government of india", "connected with the ministry", "partner with the ministry", "moe"],
+    "answer": "Yes — Siddhanta Knowledge Foundation partners with the Ministry of Education, Government of India, to re-contextualize and contemporize India’s rich traditional knowledge corpus for modern audiences."
+  },
+  {
+    "keywords": ["universities", "colleges", "educational institutions", "work with universities", "partner institutions", "schools and colleges"],
+    "answer": "Yes — Siddhanta develops IKS-based courses for schools, colleges, and universities, and collaborates with premier Indian institutions on focused research projects rooted in primary texts and manuscripts."
   },
   {
   "keywords": [
@@ -25,6 +54,11 @@
     "about siddhanta",
     "about siddhanta knowledge foundation",
     "siddhanta knowledge foundation",
+    "what does skf do",
+    "what is skf",
+    "skf",
+    "what does siddhanta do",
+    "what siddhanta does",
     "company profile",
     "organization profile",
     "mission and vision"
