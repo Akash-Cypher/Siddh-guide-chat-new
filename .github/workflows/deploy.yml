@@ -1,0 +1,81 @@
+name: Deploy backend (ECR -> App Runner)
+
+# Push to main -> run tests -> build image -> push to ECR.
+# App Runner has AutoDeploymentsEnabled, so the ECR push makes it redeploy, and
+# on boot it auto-crawls the live site (AUTO_CRAWL + CRAWL_ON_STARTUP). No manual
+# step needed. You can also run this by hand from the Actions tab ("Run workflow").
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'backend/**'
+      - 'Dockerfile'
+      - 'requirements.txt'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch: {}
+
+env:
+  AWS_REGION: ap-south-1
+  ECR_REPOSITORY: siddh-guide-backend
+  APP_RUNNER_SERVICE_ARN: arn:aws:apprunner:ap-south-1:417311687123:service/siddh-guide-chat/cd85f7d386324ef0b5914147f4204ac1
+
+jobs:
+  test:
+    name: Run tests
+    runs-on: ubuntu-latest
+    env:
+      # Keep CI hermetic: no live crawl / Bedrock calls during unit tests.
+      AUTO_CRAWL: "0"
+      ENFORCE_API_KEY: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pytest
+      - name: Run test suite
+        run: python -m pytest tests -q
+
+  deploy:
+    name: Build and push image
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, and push image to ECR
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          # Single-arch amd64, no attestation manifest -> App Runner pulls it cleanly.
+          docker build --platform linux/amd64 --provenance=false \
+            -t "$REGISTRY/$ECR_REPOSITORY:latest" \
+            -t "$REGISTRY/$ECR_REPOSITORY:${GITHUB_SHA::12}" .
+          docker push "$REGISTRY/$ECR_REPOSITORY:latest"
+          docker push "$REGISTRY/$ECR_REPOSITORY:${GITHUB_SHA::12}"
+          echo "Pushed :latest and :${GITHUB_SHA::12} — App Runner auto-deploy will pick it up."
+
+      - name: Report App Runner status (informational)
+        run: |
+          # AutoDeploy is async; this is just a snapshot, not a gate. The service
+          # goes OPERATION_IN_PROGRESS -> RUNNING on its own after the push.
+          aws apprunner describe-service \
+            --service-arn "$APP_RUNNER_SERVICE_ARN" \
+            --region "$AWS_REGION" \
+            --query 'Service.{Status:Status,Url:ServiceUrl,Image:SourceConfiguration.ImageRepository.ImageIdentifier}' \
+            --output table || true

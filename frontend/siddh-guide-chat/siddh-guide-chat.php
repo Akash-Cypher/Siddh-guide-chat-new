@@ -12,12 +12,42 @@ if (!defined('ABSPATH')) {
 define('SIDDH_GUIDE_CHAT_PLUGIN_URL', plugin_dir_url(__FILE__));
 define('SIDDH_GUIDE_CHAT_PLUGIN_PATH', plugin_dir_path(__FILE__));
 
+/**
+ * Backend base URL — resolved dynamically (no hardcoded secrets in source):
+ *   1. wp-config constant  SIDDH_CHAT_BACKEND_URL   (recommended for prod)
+ *   2. WordPress option    siddh_chat_backend_url   (set via Settings screen)
+ *   3. Sensible default    (a public URL, not a secret)
+ */
 function siddh_guide_chat_backend_base_url() {
+  if (defined('SIDDH_CHAT_BACKEND_URL') && SIDDH_CHAT_BACKEND_URL) {
+    return untrailingslashit(SIDDH_CHAT_BACKEND_URL);
+  }
+
+  $opt = trim((string) get_option('siddh_chat_backend_url', ''));
+  if ($opt !== '') {
+    return untrailingslashit($opt);
+  }
+
   return 'https://nyrqbf2z3k.ap-south-1.awsapprunner.com';
 }
 
+/**
+ * API key — resolved dynamically, never hardcoded:
+ *   1. wp-config constant  SIDDH_CHAT_API_KEY   (recommended for prod)
+ *   2. WordPress option    siddh_chat_api_key   (set via Settings screen)
+ * Returns '' when unset so the UI can warn instead of leaking a default.
+ */
 function siddh_guide_chat_api_key() {
-  return 'siddh-guide-2026-8f3c9b2a71e4d5c6f9a0';
+  if (defined('SIDDH_CHAT_API_KEY') && SIDDH_CHAT_API_KEY) {
+    return (string) SIDDH_CHAT_API_KEY;
+  }
+
+  return (string) get_option('siddh_chat_api_key', '');
+}
+
+/** True when a key is configured by either method. */
+function siddh_guide_chat_is_configured() {
+  return siddh_guide_chat_api_key() !== '';
 }
 
 /**
@@ -189,3 +219,179 @@ function siddh_guide_chat_shortcode() {
   return ob_get_clean();
 }
 add_shortcode('siddh_guide_chat', 'siddh_guide_chat_shortcode');
+
+/**
+ * ---------------------------------------------------------------------------
+ * Knowledge-base refresh: manual button (admin) + automatic on publish.
+ *
+ * When content is added/edited on the website, the chatbot's knowledge base
+ * must be re-read from the live site so it can answer about the new content.
+ * The backend already exposes POST /admin/refresh for exactly this. These
+ * hooks call it securely (API key stays server-side).
+ * ---------------------------------------------------------------------------
+ */
+
+/**
+ * Server-side call to the backend refresh endpoint.
+ * @param bool $wait  When true, block until the crawl+re-embed finishes.
+ */
+function siddh_guide_chat_trigger_refresh($wait = false) {
+  $url = siddh_guide_chat_backend_base_url() . '/admin/refresh' . ($wait ? '?wait=1' : '');
+
+  $response = wp_remote_post($url, [
+    'headers'  => [
+      'Accept'    => 'application/json',
+      'x-api-key' => siddh_guide_chat_api_key(),
+    ],
+    'timeout'  => $wait ? 120 : 20,
+    'blocking' => (bool) $wait,
+  ]);
+
+  if (is_wp_error($response)) {
+    return ['ok' => false, 'error' => $response->get_error_message()];
+  }
+
+  return [
+    'ok'   => true,
+    'code' => wp_remote_retrieve_response_code($response),
+    'body' => wp_remote_retrieve_body($response),
+  ];
+}
+
+/**
+ * Admin menu: "Siddh Guide KB" with a one-click update button.
+ */
+add_action('admin_menu', function () {
+  add_menu_page(
+    'Siddh Guide KB',
+    'Siddh Guide KB',
+    'manage_options',
+    'siddh-guide-kb',
+    'siddh_guide_chat_admin_page',
+    'dashicons-update',
+    80
+  );
+});
+
+function siddh_guide_chat_admin_page() {
+  if (!current_user_can('manage_options')) {
+    return;
+  }
+
+  $notice = '';
+
+  // Save settings (only options that are not locked by a wp-config constant).
+  if (isset($_POST['siddh_save_settings']) && check_admin_referer('siddh_settings_action')) {
+    if (!defined('SIDDH_CHAT_BACKEND_URL')) {
+      update_option('siddh_chat_backend_url', esc_url_raw(trim((string) ($_POST['siddh_backend_url'] ?? ''))));
+    }
+    // Only overwrite the key when a new value is typed; blank keeps the current one.
+    if (!defined('SIDDH_CHAT_API_KEY')) {
+      $new_key = sanitize_text_field(trim((string) ($_POST['siddh_api_key'] ?? '')));
+      if ($new_key !== '') {
+        update_option('siddh_chat_api_key', $new_key);
+      }
+    }
+    $notice = '<div class="notice notice-success"><p><strong>✅ Settings saved.</strong></p></div>';
+  }
+
+  // Trigger a manual refresh.
+  if (isset($_POST['siddh_refresh_kb']) && check_admin_referer('siddh_refresh_kb_action')) {
+    if (!siddh_guide_chat_is_configured()) {
+      $notice = '<div class="notice notice-error"><p><strong>❌ Set the API key first</strong> (below) before updating.</p></div>';
+    } else {
+      $res = siddh_guide_chat_trigger_refresh(false);
+      if (!empty($res['ok'])) {
+        $notice = '<div class="notice notice-success"><p><strong>✅ Knowledge base update started.</strong> '
+          . 'The chatbot will answer about the new website content in about a minute. '
+          . 'Refresh a chat and try a question about the new content.</p></div>';
+      } else {
+        $notice = '<div class="notice notice-error"><p><strong>❌ Could not start the update:</strong> '
+          . esc_html($res['error'] ?? 'unknown error') . '</p></div>';
+      }
+    }
+  }
+
+  $url_locked = defined('SIDDH_CHAT_BACKEND_URL');
+  $key_locked = defined('SIDDH_CHAT_API_KEY');
+  $cur_url    = esc_attr(siddh_guide_chat_backend_base_url());
+  $configured = siddh_guide_chat_is_configured();
+
+  echo '<div class="wrap">';
+  echo '<h1>Siddh Guide — Chatbot Knowledge Base</h1>';
+  echo $notice;
+
+  // Status banner.
+  echo $configured
+    ? '<p><span style="color:#0a0">●</span> API key configured &nbsp; | &nbsp; Backend: <code>' . $cur_url . '</code></p>'
+    : '<div class="notice notice-warning"><p><strong>⚠️ API key not set.</strong> Enter it in Settings below, '
+      . 'or add <code>define(\'SIDDH_CHAT_API_KEY\', \'…\');</code> to wp-config.php.</p></div>';
+
+  // Refresh button.
+  echo '<h2>Update knowledge base</h2>';
+  echo '<p>Click after you add or edit courses/pages on the website. It re-reads the live site '
+     . 'and updates the chatbot so it can answer about the new content.</p>';
+  echo '<form method="post">';
+  wp_nonce_field('siddh_refresh_kb_action');
+  echo '<p><button type="submit" name="siddh_refresh_kb" value="1" class="button button-primary button-hero"'
+     . ($configured ? '' : ' disabled') . '>🔄 Update Chatbot Knowledge Now</button></p>';
+  echo '</form>';
+  echo '<p class="description">The chatbot also refreshes automatically once a day, and ~90 seconds '
+     . 'after you <strong>publish or update</strong> a course, page, or post.</p>';
+
+  // Settings form.
+  echo '<hr><h2>Settings</h2>';
+  echo '<form method="post">';
+  wp_nonce_field('siddh_settings_action');
+  echo '<table class="form-table" role="presentation"><tbody>';
+
+  echo '<tr><th scope="row"><label for="siddh_backend_url">Backend URL</label></th><td>';
+  if ($url_locked) {
+    echo '<code>' . $cur_url . '</code> <span class="description">(locked by wp-config constant)</span>';
+  } else {
+    echo '<input name="siddh_backend_url" id="siddh_backend_url" type="url" class="regular-text" value="'
+       . esc_attr(get_option('siddh_chat_backend_url', '')) . '" placeholder="https://your-backend.awsapprunner.com">';
+  }
+  echo '</td></tr>';
+
+  echo '<tr><th scope="row"><label for="siddh_api_key">API key</label></th><td>';
+  if ($key_locked) {
+    echo '<span class="description">Set by wp-config constant <code>SIDDH_CHAT_API_KEY</code> (recommended).</span>';
+  } else {
+    $has_opt = get_option('siddh_chat_api_key', '') !== '';
+    echo '<input name="siddh_api_key" id="siddh_api_key" type="password" class="regular-text" value="" '
+       . 'placeholder="' . ($has_opt ? '•••••• (leave blank to keep current)' : 'paste API key') . '" autocomplete="off">';
+    echo '<p class="description">Stored server-side. For best security, use the wp-config constant instead.</p>';
+  }
+  echo '</td></tr>';
+
+  echo '</tbody></table>';
+  if (!$url_locked || !$key_locked) {
+    echo '<p><button type="submit" name="siddh_save_settings" value="1" class="button button-secondary">Save settings</button></p>';
+  }
+  echo '</form>';
+  echo '</div>';
+}
+
+/**
+ * Automatic refresh shortly after any course/page/post is published or updated.
+ * Debounced through wp-cron so rapid edits trigger only one refresh.
+ */
+add_action('transition_post_status', function ($new_status, $old_status, $post) {
+  if ($new_status !== 'publish') {
+    return;
+  }
+
+  $watched_types = ['post', 'page', 'product'];
+  if (!in_array($post->post_type, $watched_types, true)) {
+    return;
+  }
+
+  if (!wp_next_scheduled('siddh_guide_chat_auto_refresh_event')) {
+    wp_schedule_single_event(time() + 90, 'siddh_guide_chat_auto_refresh_event');
+  }
+}, 10, 3);
+
+add_action('siddh_guide_chat_auto_refresh_event', function () {
+  siddh_guide_chat_trigger_refresh(false);
+});

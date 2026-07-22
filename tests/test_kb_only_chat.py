@@ -236,6 +236,156 @@ def test_why_choose_siddhanta_uses_existing_faq_without_model(client, monkeypatc
     assert data["citations"] == ["faq"]
 
 
+def test_followup_continues_previous_course(client, monkeypatch):
+    """A bare follow-up ('how much is it?') is answered about the course the
+    session was just discussing instead of being refused."""
+    course = {
+        "title": "Samskrit 1: Thinking in Samskrit",
+        "content": "Course title: Samskrit 1. Duration: 30 Hours. Price: Rs. 2,500.",
+    }
+    monkeypatch.setattr(main, "COURSE_DATA", [course])
+    monkeypatch.setattr(
+        main,
+        "get_recent_messages",
+        lambda *a, **k: [
+            {"role": "user", "text": "tell me about Samskrit 1: Thinking in Samskrit"},
+            {
+                "role": "assistant",
+                "text": (
+                    "Samskrit 1: Thinking in Samskrit is listed as a Sidh Guide/Siksha "
+                    "course. Duration: 30 Hours."
+                ),
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        main,
+        "generate_answer",
+        lambda **kwargs: "The Samskrit 1 course duration is 30 Hours and the price shown is Rs. 2,500.",
+    )
+
+    response = post_chat(client, "how much is it?")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "ok"
+    assert "2,500" in data["answer"]
+    assert data["citations"] == ["courses.json | Samskrit 1: Thinking in Samskrit"]
+
+
+def test_followup_without_history_is_not_hijacked(client, monkeypatch):
+    """With no prior course in the session, a short question is NOT force-routed
+    to the continuity path (guards against false positives)."""
+    course = {
+        "title": "Samskrit 1: Thinking in Samskrit",
+        "content": "Course title: Samskrit 1. Duration: 30 Hours. Price: Rs. 2,500.",
+    }
+    monkeypatch.setattr(main, "COURSE_DATA", [course])
+    monkeypatch.setattr(main, "get_recent_messages", lambda *a, **k: [])
+    monkeypatch.setattr(main, "retrieve_hits", lambda *a, **k: [])
+    monkeypatch.setattr(main, "generate_answer", no_model_call)
+
+    response = post_chat(client, "how much is it?")
+
+    # No history -> continuity cannot fire -> falls through to a normal refusal.
+    assert response.status_code == 200
+    assert response.json()["status"] == "refused"
+
+
+# --------------------------------------------------------------------------- #
+# Answer-routing fixes: generic-keyword collision + FAQ natural phrasing.
+# --------------------------------------------------------------------------- #
+
+def _samskrit_website_entries():
+    return [
+        {
+            "id": "course-samskrit-1-thinking-in-samskrit",
+            "title": "Samskrit 1: Thinking in Samskrit",
+            "category": "course",
+            "keywords": ["Samskrit 1: Thinking in Samskrit", "Samskrit", "Foundation"],
+            "content": "Course title: Samskrit 1. Duration: 30 Hours.",
+        },
+        {
+            "id": "course-samskrit-2-understanding-treatises",
+            "title": "Samskrit 2: Understanding Treatises",
+            "category": "course",
+            "keywords": ["Samskrit 2: Understanding Treatises", "Samskrit", "Foundation"],
+            "content": "Course title: Samskrit 2. Duration: 30 Hours.",
+        },
+        {
+            "id": "course-samskrit-3-technical-literature",
+            "title": "Samskrit 3: Technical Literature",
+            "category": "course",
+            "keywords": ["Samskrit 3: Technical Literature", "Samskrit", "Foundation"],
+            "content": "Course title: Samskrit 3. Duration: 30 Hours.",
+        },
+    ]
+
+
+def test_numbered_course_series_is_not_confused(monkeypatch):
+    """'Samskrit 1' must resolve to Samskrit 1, never Samskrit 3 (they share the
+    generic 'Samskrit'/'Foundation' keywords)."""
+    monkeypatch.setattr(main, "WEBSITE_DATA", _samskrit_website_entries())
+    monkeypatch.setattr(main, "COURSE_DATA", [])
+
+    assert main._website_course_entry_in_message("tell me about Samskrit 1")["title"] \
+        == "Samskrit 1: Thinking in Samskrit"
+    assert main._website_course_entry_in_message("samskrit 2 course")["title"] \
+        == "Samskrit 2: Understanding Treatises"
+    assert main._website_course_entry_in_message("Samskrit 3")["title"] \
+        == "Samskrit 3: Technical Literature"
+
+
+def test_generic_category_keyword_does_not_hijack(monkeypatch):
+    """A course carrying the 'Foundation' category keyword must not be returned
+    for 'siddhanta knowledge foundation'."""
+    monkeypatch.setattr(
+        main,
+        "WEBSITE_DATA",
+        [
+            {
+                "id": "course-indian-knowledge-tradition-philosophy",
+                "title": "Indian Knowledge,Tradition and Philosophy",
+                "category": "course",
+                "keywords": ["Indian", "Knowledge", "Foundation", "Upcoming Courses"],
+                "content": "Course title: Indian Knowledge, Tradition and Philosophy.",
+            }
+        ],
+    )
+    monkeypatch.setattr(main, "COURSE_DATA", [])
+
+    assert main._website_course_entry_in_message("siddhanta knowledge foundation") is None
+    assert main._website_course_entry_in_message("what is Siddhanta Knowledge Foundation?") is None
+
+
+def test_faq_multiword_matches_natural_phrasing(monkeypatch):
+    """A multi-word FAQ keyword fires on a natural question, not only an exact
+    whole-message match."""
+    monkeypatch.setattr(
+        main,
+        "faq_data",
+        [{"keywords": ["siddhanta knowledge foundation"], "answer": "FOUNDATION ANSWER"}],
+    )
+    monkeypatch.setattr(main, "COURSE_DATA", [])
+
+    assert main.get_faq_answer("what is Siddhanta Knowledge Foundation?") == "FOUNDATION ANSWER"
+    assert main.get_faq_answer("siddhanta knowledge foundation") == "FOUNDATION ANSWER"
+
+
+def test_faq_multiword_no_false_substring(monkeypatch):
+    """A multi-word FAQ keyword must not match when it only appears inside a
+    larger word ('who are you' vs 'who are your instructors')."""
+    monkeypatch.setattr(
+        main,
+        "faq_data",
+        [{"keywords": ["who are you"], "answer": "ABOUT BOT"}],
+    )
+    monkeypatch.setattr(main, "COURSE_DATA", [])
+
+    assert main.get_faq_answer("who are your instructors") is None
+    assert main.get_faq_answer("who are you") == "ABOUT BOT"
+
+
 def test_enrollment_question_uses_website_data_without_model(client, monkeypatch):
     monkeypatch.setattr(
         main,

@@ -9,7 +9,26 @@ document.addEventListener('DOMContentLoaded', () => {
     return 'sess_' + Math.random().toString(36).slice(2) + Date.now();
   }
 
-  let SESSION_ID = generateSessionId();
+  // Keep one stable session id per browser tab so multi-turn continuity works
+  // (the backend threads follow-ups like "how much is it?" by session id).
+  // sessionStorage = one conversation per tab; survives reloads, clears when the
+  // tab is closed. Falls back to an in-memory id if storage is unavailable.
+  const SESSION_STORAGE_KEY = 'siddhGuideChatSessionId';
+
+  function loadSessionId() {
+    try {
+      let id = window.sessionStorage.getItem(SESSION_STORAGE_KEY);
+      if (!id) {
+        id = generateSessionId();
+        window.sessionStorage.setItem(SESSION_STORAGE_KEY, id);
+      }
+      return id;
+    } catch (e) {
+      return generateSessionId();
+    }
+  }
+
+  let SESSION_ID = loadSessionId();
 
   const chatToggleButton = document.getElementById('chatToggleButton');
   const chatWindow = document.getElementById('chatWindow');
@@ -48,6 +67,11 @@ document.addEventListener('DOMContentLoaded', () => {
   function resetChatSession() {
     clearMessages();
     SESSION_ID = generateSessionId();
+    try {
+      window.sessionStorage.setItem(SESSION_STORAGE_KEY, SESSION_ID);
+    } catch (e) {
+      // storage unavailable — in-memory id still works for this page view
+    }
   }
 
   function showProactiveMessage() {
@@ -140,7 +164,9 @@ document.addEventListener('DOMContentLoaded', () => {
       stopProactiveMessaging();
       userInput.focus();
     } else {
-      resetChatSession();
+      // Closing the bubble should NOT start a new conversation — keep the same
+      // session so reopening continues the thread (continuity). A fresh chat is
+      // an explicit action via resetChatSession() if you add a "new chat" button.
       startProactiveMessaging();
     }
   });

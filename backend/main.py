@@ -970,6 +970,82 @@ def _course_context_for_title(title: str, course_data: list[dict]) -> tuple[str,
     return "\n\n".join(chunks), [f"courses.json | {display_title}"]
 
 
+# --------------------------------------------------------------------------- #
+# Conversational continuity.
+#
+# A short follow-up ("how much is it?", "who is it for?", "tell me more") only
+# makes sense relative to the course already under discussion. On its own it
+# retrieves nothing and the bot refuses. These helpers detect such follow-ups
+# and recover the last course the session was talking about so the thread is
+# kept instead of dropped.
+# --------------------------------------------------------------------------- #
+_FOLLOWUP_PRONOUN_RE = re.compile(
+    r"\b(it|its|it's|this|that|these|those|the same|the course|one)\b", re.I
+)
+_FOLLOWUP_ATTR_RE = re.compile(
+    r"\b(how much|price|priced|cost|costs|fee|fees|duration|how long|"
+    r"hours|credits?|who is it for|who's it for|audience|eligibility|"
+    r"prerequisites?|syllabus|curriculum|outcomes?|objectives?|"
+    r"tell me more|more details?|know more|level)\b",
+    re.I,
+)
+_LISTED_AS_COURSE_RE = re.compile(r"^(.{4,120}?)\s+is listed as a Sidh Guide", re.I)
+
+
+def is_followup_about_previous(message: str) -> bool:
+    """True when the message reads like a context-dependent follow-up that only
+    makes sense relative to a course already under discussion."""
+    msg = _norm(message).lower()
+    if not msg:
+        return False
+
+    words = msg.split()
+    if len(words) > 8:
+        return False
+
+    # If the message itself names a course, it is a fresh course query, not a
+    # bare follow-up — let the normal course routing handle it.
+    if COURSE_DATA and find_course_title_in_message(message, COURSE_DATA):
+        return False
+
+    has_attr = bool(_FOLLOWUP_ATTR_RE.search(msg))
+    has_pronoun = bool(_FOLLOWUP_PRONOUN_RE.search(msg))
+    return has_attr or (has_pronoun and len(words) <= 5)
+
+
+def _last_course_title_from_history(messages: list[dict]) -> Optional[str]:
+    """The most recent course the conversation was about, scanning newest-first.
+
+    Prefers the course an assistant turn answered about (its reply opens with
+    "<Title> is listed as a Sidh Guide/Siksha course"), then falls back to any
+    course title named in an earlier turn.
+    """
+    if not COURSE_DATA:
+        return None
+
+    for m in reversed(messages or []):
+        text = (m.get("text") or "").strip()
+        if not text:
+            continue
+
+        if (m.get("role") or "").strip().lower() == "assistant":
+            mo = _LISTED_AS_COURSE_RE.match(text)
+            if mo:
+                cand = mo.group(1).strip()
+                match = (
+                    find_exact_course_title_match(cand, COURSE_DATA)
+                    or find_course_title_in_message(cand, COURSE_DATA)
+                )
+                if match:
+                    return match["title"]
+
+        match = find_course_title_in_message(text, COURSE_DATA)
+        if match:
+            return match["title"]
+
+    return None
+
+
 def rank_course_candidates(user_message: str, course_data: list[dict], limit: int = 8) -> list[dict]:
     tokens = _tokenize_query(user_message)
     expanded_terms = _expand_query_terms(tokens)
@@ -1053,9 +1129,12 @@ def get_faq_answer(message: str) -> Optional[str]:
             if kw in blocked_generic_keywords:
                 continue
 
-            # for multi-word phrases, prefer exact message match
+            # for multi-word phrases, match the whole phrase anywhere in the
+            # message (word-boundary), so natural questions like "what is
+            # Siddhanta Knowledge Foundation?" hit the intended FAQ entry, while
+            # a bare substring inside a larger word still cannot false-match.
             if " " in kw:
-                if message_lower == kw:
+                if re.search(r"\b" + re.escape(kw) + r"\b", message_lower):
                     return item.get("answer")
                 continue
 
@@ -1111,22 +1190,38 @@ def _website_course_entry_in_message(message: str) -> Optional[dict]:
 
     best: Optional[dict] = None
     best_len = 0
+    msg_numbers = set(re.findall(r"\d+", msg))
 
     for item in WEBSITE_DATA:
         if not _is_website_course_entry(item):
             continue
 
         raw_title = (item.get("title") or "").strip()
+
+        # Match ONLY on the course's own title — never on generic, shared
+        # keyword tokens ("Samskrit", "Foundation", "Indian", ...), which collide
+        # across many courses and produced confidently-wrong answers. Also allow
+        # the short prefix before a colon ("Samskrit 1: Thinking in Samskrit" ->
+        # "Samskrit 1") so users can name a course by its short form.
         variants = _course_title_variants(raw_title)
-        for keyword in item.get("keywords", []):
-            kw = (keyword or "").strip()
-            if len(kw) >= 8:
-                variants.update(_course_title_variants(kw))
+        if ":" in raw_title:
+            prefix = raw_title.split(":", 1)[0].strip()
+            if prefix:
+                variants.add(prefix)
+
+        # A numbered course ("Samskrit 1") must not be matched by a message that
+        # names a different number ("Samskrit 2"): if the title carries a number,
+        # that number has to appear in the message too.
+        title_numbers = set(re.findall(r"\d+", raw_title))
 
         for variant in variants:
             if len(variant) < 8:
                 continue
-            if variant in msg and len(variant) > best_len:
+            if variant.lower() not in msg:
+                continue
+            if title_numbers and not (title_numbers & msg_numbers):
+                continue
+            if len(variant) > best_len:
                 best = item
                 best_len = len(variant)
 
@@ -1748,6 +1843,50 @@ async def chat(
                 context_used=0,
             )
             return _response(faq_answer, ["faq"], 0, request_id, citations=["faq"])
+
+        # Conversational continuity: a bare follow-up ("how much is it?", "who is
+        # it for?", "tell me more") is resolved against the last course discussed
+        # in this session, so the thread is kept instead of refused. Only fires
+        # for genuine follow-ups that do not name a course themselves.
+        if (
+            USE_HISTORY_FOR_CONTINUITY
+            and has_prior_history
+            and COURSE_DATA
+            and is_followup_about_previous(user_message)
+        ):
+            prev_title = _last_course_title_from_history(recent_before)
+            if prev_title:
+                context, citations = _course_context_for_title(prev_title, COURSE_DATA)
+                if context and citations:
+                    answer, supported = _generated_answer_or_refusal(
+                        user_message=(
+                            f"The user is still asking about the course "
+                            f"'{_extract_primary_title(prev_title)}'.\n"
+                            f"Follow-up question: {user_message}\n"
+                            "Answer only from the provided course records. If the "
+                            "specific detail is not shown, say the website does not "
+                            "list that detail for this course."
+                        ),
+                        context=context,
+                        citations=citations,
+                        history_messages=history_messages,
+                    )
+                    if supported:
+                        put_message(
+                            session_id=session_id,
+                            role="assistant",
+                            text=answer,
+                            request_id=request_id,
+                            sources=["courses.json", "nova"],
+                            context_used=1,
+                        )
+                        return _response(
+                            answer,
+                            ["courses.json", "nova"],
+                            1,
+                            request_id,
+                            citations=citations,
+                        )
 
         if COURSE_DATA:
             course_in_message = find_course_title_in_message(user_message, COURSE_DATA)
