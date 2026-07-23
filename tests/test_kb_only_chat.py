@@ -443,6 +443,51 @@ def test_course_question_still_reaches_rag_with_faq_loaded(client, monkeypatch):
     assert data["citations"] == ["website.json | Ayush: The Indian Wellness System"]
 
 
+def test_recommendation_with_subject_uses_catalog(client, monkeypatch):
+    """'recommend a course for mba' matches the subject against the real catalog
+    and recommends a listed course."""
+    monkeypatch.setattr(
+        main, "COURSE_CATALOG",
+        [
+            {"title": "Ethical Governance Model", "categories": ["Management"]},
+            {"title": "Indian Design Thinking", "categories": ["Arts and Humanities"]},
+        ],
+    )
+    monkeypatch.setattr(main, "COURSE_DATA", [])
+    monkeypatch.setattr(
+        main, "generate_answer",
+        lambda **kw: "For an MBA background, I recommend the Ethical Governance Model course.",
+    )
+    resp = post_chat(client, "recommend a course for mba")
+    data = resp.json()
+    assert data["status"] == "ok"
+    assert "Ethical Governance Model" in data["answer"]
+    assert data["citations"] == ["courses_catalog.json | Siksha live catalog"]
+
+
+def test_recommendation_without_subject_asks_for_it(client, monkeypatch):
+    """A recommendation request with no subject asks for one instead of refusing
+    or calling the model."""
+    monkeypatch.setattr(main, "COURSE_CATALOG", [{"title": "Ethical Governance Model", "categories": ["Management"]}])
+    monkeypatch.setattr(main, "COURSE_DATA", [])
+    monkeypatch.setattr(main, "generate_answer", no_model_call)
+
+    resp = post_chat(client, "recommend a course based on my subject")
+    data = resp.json()
+    assert data["status"] == "ok"
+    assert "subject" in data["answer"].lower() or "field" in data["answer"].lower()
+
+
+def test_recommendation_hallucination_is_refused(client, monkeypatch):
+    """If the model names no real catalog course, the recommendation is refused."""
+    monkeypatch.setattr(main, "COURSE_CATALOG", [{"title": "Ethical Governance Model", "categories": ["Management"]}])
+    monkeypatch.setattr(main, "COURSE_DATA", [])
+    monkeypatch.setattr(main, "generate_answer", lambda **kw: "I recommend the Advanced Rocket Science Program.")
+
+    resp = post_chat(client, "recommend a course for aerospace")
+    assert resp.json()["status"] == "refused"
+
+
 def test_course_job_claim_not_supported_is_refused(client, monkeypatch):
     # RAG retrieves the course context, but the model's job claim is not supported
     # by it, so the answer must be refused (grounding guard).

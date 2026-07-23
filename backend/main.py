@@ -1515,6 +1515,112 @@ def _refusal_response(session_id: str, request_id: str) -> Dict:
     )
 
 
+# --------------------------------------------------------------------------- #
+# Course recommendation: match the user's subject/field against the real course
+# catalog and let the model pick from it. Kept narrow (needs an explicit
+# recommend/suggest verb) so it never hijacks course-detail questions, which
+# stay on RAG.
+# --------------------------------------------------------------------------- #
+_RECOMMEND_VERB_RE = re.compile(
+    r"\b(recommend|recomend|recommendation|recommendations|suggest|suggestion|"
+    r"suggestions|which course|what course|best course|good course|"
+    r"help me (?:choose|pick|find) a course)\b",
+    re.I,
+)
+
+_REC_GENERIC_TOKENS = {
+    "subject", "subjects", "field", "fields", "based", "interest", "interests",
+    "topic", "topics", "area", "areas", "stream", "background", "domain",
+}
+
+
+def _is_recommendation_request(message: str) -> bool:
+    if not _RECOMMEND_VERB_RE.search(_norm(message)):
+        return False
+    # If a specific course is named, it's a detail question, not a recommendation.
+    if COURSE_DATA and find_course_title_in_message(message, COURSE_DATA):
+        return False
+    return True
+
+
+def _recommendation_subject_terms(message: str) -> list[str]:
+    """Meaningful subject tokens in a recommendation request. Empty means no
+    subject was given (e.g. 'recommend a course based on my subject')."""
+    return [t for t in _tokenize_query(message) if t not in _REC_GENERIC_TOKENS]
+
+
+def _recommend_courses_response(
+    user_message: str,
+    history_messages: list[dict],
+    session_id: str,
+    request_id: str,
+) -> Dict:
+    if not COURSE_CATALOG:
+        return _rag_answer_response(user_message, history_messages, session_id, request_id)
+
+    # No subject named -> ask for one instead of refusing.
+    if not _recommendation_subject_terms(user_message):
+        answer = (
+            "Sure — which subject or field are you interested in? For example: "
+            "management, law, architecture, Sanskrit, agriculture, psychology, or "
+            "education. Tell me the area and I'll suggest matching courses."
+        )
+        put_message(
+            session_id=session_id, role="assistant", text=answer,
+            request_id=request_id, sources=["local"], context_used=0,
+        )
+        return _response(answer, ["local"], 0, request_id)
+
+    # Give the model the real catalog (title + categories) and the user's request,
+    # then let it pick the best-fitting courses. Including the request text keeps
+    # the user's own terms (e.g. "MBA") in the grounded context.
+    lines = []
+    for c in COURSE_CATALOG:
+        title = (c.get("title") or "").strip()
+        if not title:
+            continue
+        cats = c.get("categories") or []
+        cat_text = ", ".join(str(x) for x in cats) if isinstance(cats, list) else str(cats)
+        lines.append(f"- {title}" + (f" (categories: {cat_text})" if cat_text else ""))
+
+    context = (
+        "[source=courses_catalog.json | Siksha course catalog]\n"
+        f"User request: {user_message}\n"
+        "Available Siksha courses:\n" + "\n".join(lines)
+    )
+    citations = ["courses_catalog.json | Siksha live catalog"]
+
+    try:
+        answer = generate_answer(
+            user_message=(
+                f"The user asked for a course recommendation: {user_message}\n"
+                "From the Available Siksha courses listed in the context, choose the 1-3 "
+                "that best fit the user's subject, field, or interest, and briefly say why "
+                "each fits. Only name courses that appear in the list; never invent a course."
+            ),
+            context=context,
+            history_messages=history_messages,
+        )
+    except Exception:
+        logger.exception("[%s] recommendation generation failed", request_id)
+        return _refusal_response(session_id, request_id)
+
+    answer = _strip_embedded_refusal(answer)
+    # Guard against hallucination: the answer must name a real catalog course.
+    names_real_course = any(
+        (c.get("title") or "").strip() and (c.get("title") or "").strip().lower() in answer.lower()
+        for c in COURSE_CATALOG
+    )
+    if _looks_like_idk(answer) or not names_real_course:
+        return _refusal_response(session_id, request_id)
+
+    put_message(
+        session_id=session_id, role="assistant", text=answer,
+        request_id=request_id, sources=["courses_catalog.json", "nova"], context_used=1,
+    )
+    return _response(answer, ["courses_catalog.json", "nova"], 1, request_id, citations=citations)
+
+
 def _retrieval_query(user_message: str, recent_messages: Optional[list[dict]] = None) -> str:
     """Build the text used for vector retrieval.
 
@@ -1855,6 +1961,14 @@ async def chat(
                 context_used=0,
             )
             return _response(faq_answer, ["faq"], 0, request_id, citations=["faq"])
+
+        # Course recommendation ("recommend a course for MBA"): match the subject
+        # against the real catalog. Needs an explicit recommend/suggest verb and
+        # no specific course named, so course-detail questions stay on RAG.
+        if _is_recommendation_request(user_message):
+            return _recommend_courses_response(
+                user_message, history_messages, session_id, request_id
+            )
 
         # RAG-first: every remaining question is answered by retrieving the most
         # relevant knowledge-base content and letting the model write a grounded,
