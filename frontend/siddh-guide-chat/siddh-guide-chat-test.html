@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Siddh Guide — Chatbot Test</title>
+
+<!--
+  ==========================================================================
+  SIDDH GUIDE — STANDALONE CHATBOT TEST PAGE  (single self-contained file)
+  ==========================================================================
+  WHAT THIS IS
+    A dedicated page to test the Siddh Guide chat widget at its own URL,
+    without adding it to a normal WordPress page. Same widget, same backend.
+
+  HOW IT REACHES THE BOT
+    It calls the WordPress proxy at API_BASE (default: /wp-json/siddh/v1).
+    That proxy (provided by the "Siddh Guide Chat" plugin) adds the secret API
+    key server-side and forwards to the AWS backend. So the key is NEVER in
+    this file, and there is no CORS problem.
+
+  >>> WHERE TO HOST IT (important) <<<
+    ✅ Put this file on the SAME DOMAIN as the WordPress site, e.g.
+         https://siddhantaknowledge.org/siddh-guide-test.html
+       and make sure the "Siddh Guide Chat" plugin is INSTALLED & ACTIVE
+       (it provides /wp-json/siddh/v1/chat). Then it just works.
+
+    ❌ It will NOT work opened from your desktop (file://) or from a different
+       domain — the backend only accepts calls through the proxy on the site's
+       own domain (the API key must stay server-side, and CORS is locked to
+       siddhantaknowledge.org). To host it on a separate test domain, the dev
+       team must run a proxy that holds the key and set API_BASE below to it.
+
+  CONFIG
+    - API_BASE : the proxy base URL (see the <script> block below).
+    - logo     : update the <img src> in the chat header if the path differs.
+  ==========================================================================
+-->
+
+<style>
+  /* ---- page chrome (test page only) ---- */
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    font-family: system-ui, "Segoe UI", Arial, sans-serif;
+    background: #f4f4f6;
+    color: #1a1a1a;
+  }
+  .hero { max-width: 720px; margin: 0 auto; padding: 72px 24px; text-align: center; }
+  .hero .badge {
+    display: inline-block; background: #F58A08; color: #fff;
+    font-size: 12px; font-weight: 700; letter-spacing: .04em;
+    padding: 4px 12px; border-radius: 20px; margin-bottom: 18px;
+  }
+  .hero h1 { color: #6b1f1f; margin: 0 0 10px; font-size: 30px; }
+  .hero p { color: #555; font-size: 16px; line-height: 1.55; margin: 8px 0; }
+  .hero .try { background:#fff; border:1px solid #e2e2e6; border-radius:12px; padding:16px 18px; margin-top:22px; text-align:left; }
+  .hero .try b { color:#6b1f1f; }
+  .hero .try code { background:#f0f0f0; padding:2px 6px; border-radius:6px; font-size:13px; }
+  .hero .hint { margin-top: 24px; font-size: 13px; color: #999; }
+
+  /* ---- widget styles (verbatim from the plugin's style.css) ---- */
+  .chat-toggle-button {
+    position: fixed; bottom: 20px; right: 20px; width: 60px; height: 60px;
+    background-color: #F58A08; color: #ffffff; border-radius: 50%; border: none;
+    cursor: pointer; box-shadow: 0 4px 8px rgba(0,0,0,0.2); display: flex;
+    justify-content: center; align-items: center; z-index: 9998;
+    transition: transform 0.2s ease; padding: 0;
+  }
+  .chat-toggle-button:hover { transform: scale(1.06); }
+  .proactive-message {
+    position: fixed; bottom: 35px; right: 90px; background-color: #f0f0f0;
+    color: #222222; padding: 10px 15px; border-radius: 15px;
+    box-shadow: 0 2px 5px rgba(0,0,0,0.1); z-index: 9997; max-width: 220px;
+    opacity: 0; transition: opacity 0.5s ease-in-out;
+  }
+  .proactive-message.visible { opacity: 1; }
+  .chat-window {
+    position: fixed; bottom: 90px; right: 20px; width: 350px;
+    max-width: calc(100vw - 24px); height: 500px; max-height: calc(100vh - 120px);
+    background-color: #ffffff; border-radius: 12px; box-shadow: 0 5px 15px rgba(0,0,0,0.28);
+    display: none; flex-direction: column; z-index: 9999; overflow: hidden;
+  }
+  .chat-window.visible { display: flex; }
+  .chat-header {
+    background-color: #F58A08; color: #ffffff; font-size: 18px; font-weight: 700;
+    display: flex; align-items: center; justify-content: center; padding: 12px 14px; text-align: center;
+  }
+  .chat-header img { width: 44px; height: 44px; object-fit: contain; margin-right: 10px; }
+  .chat-messages {
+    flex: 1 1 auto; min-height: 0; padding: 15px; overflow-y: auto;
+    display: flex; flex-direction: column; gap: 10px; background: #ffffff;
+  }
+  .message {
+    padding: 10px 15px; border-radius: 18px; max-width: 80%; line-height: 1.45;
+    white-space: pre-wrap; word-break: break-word; font-size: 14px;
+  }
+  .message.user { background-color: #e0e0e0; color: #111111; align-self: flex-end; }
+  .message.bot { background-color: #F58A08; color: #ffffff; align-self: flex-start; }
+  .message.bot.typing { opacity: 0.9; }
+  .chat-input-form {
+    display: flex; align-items: center; gap: 8px; border-top: 1px solid #dddddd;
+    padding: 10px; background: #ffffff;
+  }
+  #userInput { flex: 1 1 auto; border: 1px solid #cccccc; border-radius: 20px; padding: 10px 15px; font-size: 16px; }
+  #userInput:focus { outline: none; border-color: #F58A08; }
+  .chat-input-form button { background: none; border: none; color: #F58A08; cursor: pointer; padding: 0 10px; }
+  .chat-input-form button svg { width: 24px; height: 24px; }
+  @media (max-width: 480px) {
+    .chat-window { right: 12px; bottom: 84px; width: calc(100vw - 24px); height: 70vh; }
+    .proactive-message { right: 80px; max-width: 180px; }
+  }
+</style>
+</head>
+<body>
+
+  <div class="hero">
+    <div class="badge">TEST PAGE</div>
+    <h1>Siddh Guide Assistant</h1>
+    <p>This page is for testing the Siddh Guide chatbot. Click the orange chat button in the bottom-right corner and ask a question.</p>
+    <div class="try">
+      <p style="margin-top:0"><b>Try asking:</b></p>
+      <p>• <code>how many courses are there</code><br>
+         • <code>how do I enroll</code><br>
+         • <code>what is Siddhanta Knowledge Foundation?</code><br>
+         • <code>recommend a course for management</code></p>
+    </div>
+    <p class="hint">If the chat button doesn’t respond, the “Siddh Guide Chat” plugin (proxy) may not be active on this domain — see the note at the top of this file’s source.</p>
+  </div>
+
+  <!-- ================= WIDGET MARKUP (same element IDs as the plugin) ================= -->
+  <div class="proactive-message" id="proactiveMessage"></div>
+
+  <button class="chat-toggle-button" id="chatToggleButton" aria-label="Open chat">
+    <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" fill="currentColor" viewBox="0 0 16 16">
+      <path d="M2.678 11.894a1 1 0 0 1 .287.801 11 11 0 0 1-.398 2c1.395-.323 2.247-.697 2.634-.893a1 1 0 0 1 .71-.074A8 8 0 0 0 8 14c3.996 0 7-2.807 7-6s-3.004-6-7-6-7 2.808-7 6c0 1.468.617 2.83 1.678 3.894m-.493 3.905a22 22 0 0 1-.713.129c-.2.032-.352-.176-.273-.362a10 10 0 0 0 .244-.637l.003-.01c.248-.72.45-1.548.524-2.319C.743 11.37 0 9.76 0 8c0-3.866 3.582-7 8-7s8 3.134 8 7-3.582 7-8 7a9 9 0 0 1-2.347-.306c-.52.263-1.639.742-3.468 1.105"/>
+    </svg>
+  </button>
+
+  <div class="chat-window" id="chatWindow">
+    <div class="chat-header">
+      <!-- Update this path to your logo if needed (defaults to the plugin asset on the same WP domain). -->
+      <img src="/wp-content/plugins/siddh-guide-chat/assets/siddhanta-logo.png" alt="Siddhanta Logo"
+           onerror="this.style.display='none'">
+      <span>Siddh Guide Assistant</span>
+    </div>
+
+    <div class="chat-messages" id="chatMessages"></div>
+
+    <form class="chat-input-form" id="chatForm">
+      <input type="text" id="userInput" placeholder="Ask a question..." autocomplete="off">
+      <button type="submit" aria-label="Send message">
+        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"></path>
+        </svg>
+      </button>
+    </form>
+  </div>
+
+  <script>
+  document.addEventListener('DOMContentLoaded', () => {
+    // ============================ CONFIG ============================
+    // The WordPress proxy base. Keep as-is when this page is hosted on the
+    // same domain as the WordPress site (recommended). Only change it if you
+    // host this page elsewhere AND run a proxy that holds the API key.
+    const API_BASE = '/wp-json/siddh/v1';
+    // ================================================================
+
+    function generateSessionId() {
+      if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+        return window.crypto.randomUUID();
+      }
+      return 'sess_' + Math.random().toString(36).slice(2) + Date.now();
+    }
+
+    // One stable session per browser tab so multi-turn continuity works.
+    const SESSION_STORAGE_KEY = 'siddhGuideChatSessionId';
+    function loadSessionId() {
+      try {
+        let id = window.sessionStorage.getItem(SESSION_STORAGE_KEY);
+        if (!id) { id = generateSessionId(); window.sessionStorage.setItem(SESSION_STORAGE_KEY, id); }
+        return id;
+      } catch (e) { return generateSessionId(); }
+    }
+    let SESSION_ID = loadSessionId();
+
+    const chatToggleButton = document.getElementById('chatToggleButton');
+    const chatWindow = document.getElementById('chatWindow');
+    const proactiveMessage = document.getElementById('proactiveMessage');
+    const chatForm = document.getElementById('chatForm');
+    const userInput = document.getElementById('userInput');
+    const chatMessages = document.getElementById('chatMessages');
+
+    if (!chatToggleButton || !chatWindow || !proactiveMessage || !chatForm || !userInput || !chatMessages) {
+      return;
+    }
+
+    const proactiveMessages = [
+      'Hi! Do you need any guidance?',
+      'Hello! Are you looking for any course-related help?',
+      'Need help with our services? Ask me!',
+      'Curious about our courses? I can help.'
+    ];
+    let proactiveIndex = 0;
+    let proactiveInterval = null;
+
+    function addMessage(text, sender) {
+      const el = document.createElement('div');
+      el.classList.add('message', sender);
+      el.textContent = text;
+      chatMessages.appendChild(el);
+      chatMessages.scrollTop = chatMessages.scrollHeight;
+      return el;
+    }
+
+    function showProactiveMessage() {
+      proactiveMessage.textContent = proactiveMessages[proactiveIndex];
+      proactiveMessage.classList.add('visible');
+      setTimeout(() => proactiveMessage.classList.remove('visible'), 5000);
+      proactiveIndex = (proactiveIndex + 1) % proactiveMessages.length;
+    }
+    function startProactiveMessaging() {
+      if (chatWindow.classList.contains('visible')) return;
+      stopProactiveMessaging();
+      proactiveInterval = setInterval(showProactiveMessage, 8000);
+    }
+    function stopProactiveMessaging() {
+      if (proactiveInterval) { clearInterval(proactiveInterval); proactiveInterval = null; }
+      proactiveMessage.classList.remove('visible');
+    }
+
+    function typewriterEffect(element, text) {
+      let i = 0; element.textContent = ''; const speed = 8;
+      (function type() {
+        if (i < text.length) {
+          element.textContent += text.charAt(i); i += 1;
+          chatMessages.scrollTop = chatMessages.scrollHeight;
+          setTimeout(type, speed);
+        }
+      })();
+    }
+
+    async function fetchBotResponse(userMessage) {
+      const botEl = addMessage('...', 'bot');
+      botEl.classList.add('typing');
+      try {
+        const response = await fetch(`${API_BASE}/chat`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+          body: JSON.stringify({ message: userMessage, session_id: SESSION_ID })
+        });
+        if (!response.ok) {
+          let errText = `HTTP error: ${response.status}`;
+          try { const j = await response.json(); if (j && j.detail) errText = j.detail; } catch (e) {}
+          throw new Error(errText);
+        }
+        const data = await response.json();
+        botEl.classList.remove('typing');
+        botEl.textContent = '';
+        typewriterEffect(botEl, data.answer || '');
+      } catch (error) {
+        console.error('Error fetching bot response:', error);
+        botEl.classList.remove('typing');
+        botEl.textContent = 'Sorry, something went wrong. Please try again.';
+      }
+    }
+
+    chatToggleButton.addEventListener('click', () => {
+      const isVisible = chatWindow.classList.toggle('visible');
+      if (isVisible) { stopProactiveMessaging(); userInput.focus(); }
+      else { startProactiveMessaging(); }
+    });
+
+    chatForm.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const text = userInput.value.trim();
+      if (!text) return;
+      addMessage(text, 'user');
+      userInput.value = '';
+      fetchBotResponse(text);
+    });
+
+    setTimeout(startProactiveMessaging, 3000);
+  });
+  </script>
+</body>
+</html>
