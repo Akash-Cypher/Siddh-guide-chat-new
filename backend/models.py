@@ -42,7 +42,13 @@ def _build_system_prompt(context: str) -> str:
         "the user asks how to do something (enrol, access a course, contact, pay) "
         "and the context explains it, give clear step-by-step guidance.\n"
         "- Keep responses direct and grounded in the context; do not pad.\n"
-        "- Do not invent course names, fees, eligibility, dates, people, or promises.\n\n"
+        "- Do not invent course names, fees, eligibility, dates, people, or promises.\n"
+        "- URLs, web addresses, domains, and email addresses: output ONLY ones that "
+        "appear character-for-character in the context above. Never shorten, "
+        "complete, guess, correct, or construct one — e.g. never turn "
+        "'siddhantaknowledge.org' into 'siddhanta.org', and never invent a course "
+        "link. If the exact URL is not present in the context, do not give a URL; "
+        "instead tell the user to open the course page on the website.\n\n"
         f"Sidh Guide context:\n{context.strip()}"
     )
 

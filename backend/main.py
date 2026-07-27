@@ -1015,7 +1015,17 @@ def is_followup_about_previous(message: str) -> bool:
 
     has_attr = bool(_FOLLOWUP_ATTR_RE.search(msg))
     has_pronoun = bool(_FOLLOWUP_PRONOUN_RE.search(msg))
-    return has_attr or (has_pronoun and len(words) <= 5)
+
+    # This runs only AFTER greetings, anchors (count/list) and the FAQ have all
+    # declined — so a short message arriving here, in an ongoing session, is
+    # almost always a follow-up ("what about electrical engineering", "can you
+    # provide the link?", "and the url?"). Treat short messages as follow-ups
+    # too, not just ones with an explicit pronoun/attribute cue. The generation
+    # step stays KB-grounded, so a genuinely off-topic short question still
+    # refuses safely. Cap the "short" rule at 5 words so self-contained 6+ word
+    # questions (e.g. "what does the Ayush course cover?") are NOT treated as
+    # follow-ups and stay un-polluted by prior context.
+    return has_attr or has_pronoun or len(words) <= 5
 
 
 def _last_course_context_from_history(messages: list[dict]) -> Optional[tuple[str, list[str]]]:
@@ -1522,9 +1532,16 @@ def _refusal_response(session_id: str, request_id: str) -> Dict:
 # stay on RAG.
 # --------------------------------------------------------------------------- #
 _RECOMMEND_VERB_RE = re.compile(
-    r"\b(recommend|recomend|recommendation|recommendations|suggest|suggestion|"
+    # explicit recommend/suggest phrasings ...
+    r"\b(?:recommend|recomend|recommendation|recommendations|suggest|suggestion|"
     r"suggestions|which course|what course|best course|good course|"
-    r"help me (?:choose|pick|find) a course)\b",
+    r"help me (?:choose|pick|find) a course)\b"
+    # ... OR a field/subject-scoped course query, e.g. "courses on economics",
+    # "any course relevant to tamil", "courses for engineering students",
+    # "course related to robotics". These should match against the catalog, not
+    # fall through to a refusal. (A named course is still excluded below.)
+    r"|\bcourses?\s+(?:on|about|related to|relevant to|regarding|for|in|of)\b"
+    r"|\bany\s+courses?\b",
     re.I,
 )
 
@@ -1634,14 +1651,24 @@ def _retrieval_query(user_message: str, recent_messages: Optional[list[dict]] = 
     if not recent_messages or not is_followup_about_previous(user_message):
         return user_message
 
+    # Anchor the follow-up with the last couple of turns (user AND assistant),
+    # so the course/topic under discussion is carried into retrieval. The
+    # assistant turn usually names the exact course ("... Indian System of Music
+    # ..."), which is what makes "can you provide the link?" resolve correctly.
+    tail: list[str] = []
     for m in reversed(recent_messages):
-        if (m.get("role") or "").strip().lower() != "user":
+        text = (m.get("text") or "").strip()
+        if not text or text.lower() == user_message.lower():
             continue
-        prev = (m.get("text") or "").strip()
-        if prev and prev.lower() != user_message.lower():
-            return f"{prev}. {user_message}"
+        tail.append(text[:200])
+        if len(tail) >= 2:
+            break
 
-    return user_message
+    if not tail:
+        return user_message
+
+    tail.reverse()
+    return " ".join(tail) + ". " + user_message
 
 
 def _rag_answer_response(

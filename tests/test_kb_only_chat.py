@@ -283,6 +283,32 @@ def test_history_aware_retrieval_anchors_followup(client, monkeypatch):
     assert data["citations"] == ["website.json | Samskrit 1: Thinking in Samskrit"]
 
 
+def test_followup_detection_covers_short_no_cue_questions(monkeypatch):
+    """Short natural follow-ups without a pronoun/attribute cue are now detected,
+    while self-contained 6+ word questions are not (so they stay un-polluted)."""
+    monkeypatch.setattr(main, "COURSE_DATA", [])
+    assert main.is_followup_about_previous("can you provide the link?")
+    assert main.is_followup_about_previous("what about electrical engineering")
+    assert main.is_followup_about_previous("and the url?")
+    # self-contained 6-word question (no cue) -> NOT a follow-up
+    assert not main.is_followup_about_previous("what does the Ayush course cover")
+
+
+def test_retrieval_query_anchors_short_followup(monkeypatch):
+    """A short follow-up is anchored with the last turns (incl. the assistant
+    turn that names the course); a self-contained question is used verbatim."""
+    monkeypatch.setattr(main, "COURSE_DATA", [])
+    hist = [
+        {"role": "user", "text": "provide the price of indian system music"},
+        {"role": "assistant", "text": "The price for the course Indian System of Music is Rs. 2,500."},
+    ]
+    q = main._retrieval_query("can you provide the link?", hist)
+    assert "Indian System of Music" in q          # anchored with prior topic
+    assert q.endswith("can you provide the link?")  # original question preserved
+    # self-contained question is NOT anchored/polluted
+    assert main._retrieval_query("what does the Ayush course cover", hist) == "what does the Ayush course cover"
+
+
 def test_followup_without_history_is_not_hijacked(client, monkeypatch):
     """With no prior course in the session, a short question is NOT force-routed
     to the continuity path (guards against false positives)."""
