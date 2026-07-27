@@ -58,6 +58,14 @@ PRESERVE_IDS = {"pricing-information", "enrollment-overview", "about-what-siddha
 NON_COURSE_PRODUCT_SLUGS = {"eie-quiz", "gift-coupon"}
 NON_COURSE_SLUG_MARKERS = ("quiz", "coupon", "gift", "-demo", "demo-", "survey")
 
+# Shared search keywords so "who are the research team members / researchers"
+# retrieves the Shodha research pages (whose team names are pulled live by the
+# crawler). Hints only — the actual member names come from the live page.
+_RESEARCH_TEAM_KEYWORDS = [
+    "research team", "research team members", "team members", "researchers",
+    "who are the researchers", "who is on the research team", "research members",
+]
+
 # Curated pages to crawl. The id is stable; where main.py relies on a specific id
 # for a hard-coded answer, that id is reused so the answer keeps resolving.
 CURATED_PAGES: list[dict] = [
@@ -71,11 +79,15 @@ CURATED_PAGES: list[dict] = [
     {"id": "sandhaan-linguistics", "url": f"{MAIN_SITE}/sandhaan/linguistics/", "category": "research", "title": "Sandhaan - Linguistics"},
     {"id": "sandhaan-jyotisha", "url": f"{MAIN_SITE}/sandhaan/jyotisha/", "category": "research", "title": "Sandhaan - Jyotisha"},
     {"id": "sandhaan-yoga", "url": f"{MAIN_SITE}/sandhaan/yoga/", "category": "research", "title": "Sandhaan - Yoga"},
-    {"id": "shodha-research-overview", "url": f"{MAIN_SITE}/shodha/", "category": "about", "title": "Shodha"},
-    {"id": "shodha-siddhanta-prastuti", "url": f"{MAIN_SITE}/shodha/siddhanta-prastuti/", "category": "research", "title": "Shodha - Siddhanta Prastuti"},
-    {"id": "shodha-indic-thought-models", "url": f"{MAIN_SITE}/shodha/indic-thought-models/", "category": "research", "title": "Shodha - Indic Thought Models"},
-    {"id": "shodha-conscious-enterprise-management", "url": f"{MAIN_SITE}/shodha/conscious-enterprise-management/", "category": "research", "title": "Shodha - Conscious Enterprise Management"},
-    {"id": "prakashan-overview", "url": f"{MAIN_SITE}/prakashan/", "category": "publication", "title": "Prakashan (Publications)"},
+    {"id": "shodha-research-overview", "url": f"{MAIN_SITE}/shodha/", "category": "about", "title": "Shodha", "keywords": _RESEARCH_TEAM_KEYWORDS},
+    {"id": "shodha-siddhanta-prastuti", "url": f"{MAIN_SITE}/shodha/siddhanta-prastuti/", "category": "research", "title": "Shodha - Siddhanta Prastuti", "keywords": _RESEARCH_TEAM_KEYWORDS},
+    {"id": "shodha-indic-thought-models", "url": f"{MAIN_SITE}/shodha/indic-thought-models/", "category": "research", "title": "Shodha - Indic Thought Models", "keywords": _RESEARCH_TEAM_KEYWORDS},
+    {"id": "shodha-conscious-enterprise-management", "url": f"{MAIN_SITE}/shodha/conscious-enterprise-management/", "category": "research", "title": "Shodha - Conscious Enterprise Management", "keywords": _RESEARCH_TEAM_KEYWORDS},
+    {"id": "shodha-transformational-bharatiya-pedagogy", "url": f"{MAIN_SITE}/shodha/transformational-bharatiya-pedagogy/", "category": "research", "title": "Shodha - Transformational Bharatiya Pedagogy", "keywords": _RESEARCH_TEAM_KEYWORDS},
+    {"id": "prakashan-overview", "url": f"{MAIN_SITE}/prakashan/", "category": "publication", "title": "Prakashan (Publications)",
+     "keywords": ["publications", "publication", "books", "book", "prakashan",
+                  "buy books", "purchase books", "purchase publications",
+                  "where to buy", "list of books", "books published", "our books"]},
     {"id": "events-overview", "url": f"{MAIN_SITE}/events/", "category": "events", "title": "Events"},
     {"id": "siddhantavijnan-overview", "url": f"{VIJNAN_SITE}/", "category": "platform", "title": "Siddhanta Vijnan"},
     {"id": "contact-support", "url": f"{MAIN_SITE}/contact/", "category": "support", "title": "Contact Siddhanta"},
@@ -145,8 +157,19 @@ def extract_page_text(page_html: str, max_chars: int = MAX_CONTENT_CHARS) -> str
         or soup
     )
 
-    text = main.get_text(separator=" ", strip=True)
-    text = _clean_text(text)
+    # Collect section / item headings first (e.g. the "Our Books" titles on the
+    # Publications page, event names, etc.). They are pulled live from the page —
+    # nothing hardcoded — and placed at the front so they survive the length cap
+    # and are embedded prominently. This is what lets the bot list the actual
+    # publications/books dynamically instead of only the page's intro text.
+    headings: list[str] = []
+    for h in main.find_all(["h1", "h2", "h3", "h4"]):
+        ht = _clean_text(h.get_text(" ", strip=True))
+        if 3 <= len(ht) <= 140 and ht not in headings:
+            headings.append(ht)
+
+    body = _clean_text(main.get_text(separator=" ", strip=True))
+    text = (" | ".join(headings) + ". " + body).strip() if headings else body
 
     if len(text) > max_chars:
         text = text[:max_chars].rsplit(" ", 1)[0] + "..."
@@ -418,7 +441,7 @@ def crawl_curated_pages() -> list[dict]:
                 "title": page["title"],
                 "source_url": page["url"],
                 "category": page["category"],
-                "keywords": _keywords_from(page["title"]),
+                "keywords": _keywords_from(page["title"], page.get("keywords", [])),
                 "content": content,
                 "last_verified": today,
             }
