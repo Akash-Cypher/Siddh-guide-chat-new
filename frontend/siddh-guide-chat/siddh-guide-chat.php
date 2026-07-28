@@ -1,7 +1,7 @@
 <?php
 /**
- * Plugin Name: Siddh Guide Chat
- * Description: Siddh Guide chatbot widget with secure WordPress proxy.
+ * Plugin Name: Ask Sid
+ * Description: Ask Sid chatbot widget with secure WordPress proxy.
  * Version: 1.0.0
  */
 
@@ -201,7 +201,7 @@ function siddh_guide_chat_shortcode() {
   <div class="chat-window" id="chatWindow">
     <div class="chat-header">
       <img src="<?php echo $logo_url; ?>" alt="Siddhanta Logo">
-      <span>Siddh Guide Assistant</span>
+      <span>Ask Sid</span>
     </div>
 
     <div class="chat-messages" id="chatMessages"></div>
@@ -259,12 +259,12 @@ function siddh_guide_chat_trigger_refresh($wait = false) {
 }
 
 /**
- * Admin menu: "Siddh Guide KB" with a one-click update button.
+ * Admin menu: "Ask Sid KB" with a one-click update button.
  */
 add_action('admin_menu', function () {
   add_menu_page(
-    'Siddh Guide KB',
-    'Siddh Guide KB',
+    'Ask Sid KB',
+    'Ask Sid KB',
     'manage_options',
     'siddh-guide-kb',
     'siddh_guide_chat_admin_page',
@@ -318,7 +318,7 @@ function siddh_guide_chat_admin_page() {
   $configured = siddh_guide_chat_is_configured();
 
   echo '<div class="wrap">';
-  echo '<h1>Siddh Guide — Chatbot Knowledge Base</h1>';
+  echo '<h1>Ask Sid — Chatbot Knowledge Base</h1>';
   echo $notice;
 
   // Status banner.

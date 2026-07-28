@@ -3,26 +3,26 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Siddh Guide — Chatbot Test</title>
+<title>Ask Sid — Chatbot Test</title>
 
 <!--
   ==========================================================================
-  SIDDH GUIDE — STANDALONE CHATBOT TEST PAGE  (single self-contained file)
+  ASK SID — STANDALONE CHATBOT TEST PAGE  (single self-contained file)
   ==========================================================================
   WHAT THIS IS
-    A dedicated page to test the Siddh Guide chat widget at its own URL,
+    A dedicated page to test the Ask Sid chat widget at its own URL,
     without adding it to a normal WordPress page. Same widget, same backend.
 
   HOW IT REACHES THE BOT
     It calls the WordPress proxy at API_BASE (default: /wp-json/siddh/v1).
-    That proxy (provided by the "Siddh Guide Chat" plugin) adds the secret API
+    That proxy (provided by the "Ask Sid" plugin) adds the secret API
     key server-side and forwards to the AWS backend. So the key is NEVER in
     this file, and there is no CORS problem.
 
   >>> WHERE TO HOST IT (important) <<<
     ✅ Put this file on the SAME DOMAIN as the WordPress site, e.g.
          https://siddhantaknowledge.org/siddh-guide-test.html
-       and make sure the "Siddh Guide Chat" plugin is INSTALLED & ACTIVE
+       and make sure the "Ask Sid" plugin is INSTALLED & ACTIVE
        (it provides /wp-json/siddh/v1/chat). Then it just works.
 
     ❌ It will NOT work opened from your desktop (file://) or from a different
@@ -116,8 +116,8 @@
 
   <div class="hero">
     <div class="badge">TEST PAGE</div>
-    <h1>Siddh Guide Assistant</h1>
-    <p>This page is for testing the Siddh Guide chatbot. Click the orange chat button in the bottom-right corner and ask a question.</p>
+    <h1>Ask Sid</h1>
+    <p>This page is for testing the Ask Sid chatbot. Click the orange chat button in the bottom-right corner and ask a question.</p>
     <div class="try">
       <p style="margin-top:0"><b>Try asking:</b></p>
       <p>• <code>how many courses are there</code><br>
@@ -125,7 +125,7 @@
          • <code>what is Siddhanta Knowledge Foundation?</code><br>
          • <code>recommend a course for management</code></p>
     </div>
-    <p class="hint">If the chat button doesn’t respond, the “Siddh Guide Chat” plugin (proxy) may not be active on this domain — see the note at the top of this file’s source.</p>
+    <p class="hint">If the chat button doesn’t respond, the “Ask Sid” plugin (proxy) may not be active on this domain — see the note at the top of this file’s source.</p>
   </div>
 
   <!-- ================= WIDGET MARKUP (same element IDs as the plugin) ================= -->
@@ -142,7 +142,7 @@
       <!-- Update this path to your logo if needed (defaults to the plugin asset on the same WP domain). -->
       <img src="/wp-content/plugins/siddh-guide-chat/assets/siddhanta-logo.png" alt="Siddhanta Logo"
            onerror="this.style.display='none'">
-      <span>Siddh Guide Assistant</span>
+      <span>Ask Sid</span>
     </div>
 
     <div class="chat-messages" id="chatMessages"></div>

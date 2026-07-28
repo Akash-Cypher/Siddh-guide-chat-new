@@ -1,8 +1,8 @@
-Siddh Guide Chat Widget – WordPress Integration Guide
+Ask Sid Chat Widget – WordPress Integration Guide
 
 Hi Team,
 
-Please follow the steps below to integrate the Siddh Guide Chat Widget into the website.
+Please follow the steps below to integrate the Ask Sid Chat Widget into the website.
 
 This chatbot connects WordPress to our AWS backend securely through a proxy plugin.
 
@@ -22,7 +22,7 @@ WordPress Admin → Plugins
 
 Activate:
 
-Siddh Guide Chat Proxy
+Ask Sid
 2️⃣ Add API Key (Important)
 
 Open the WordPress configuration file:
