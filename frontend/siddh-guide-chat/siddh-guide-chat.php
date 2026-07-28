@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Ask Sid
  * Description: Ask Sid chatbot widget with secure WordPress proxy.
- * Version: 1.0.0
+ * Version: 1.1.0
  */
 
 if (!defined('ABSPATH')) {
@@ -148,19 +148,36 @@ function siddh_guide_chat_history_proxy(WP_REST_Request $request) {
 /**
  * Enqueue assets
  */
+/**
+ * Cache-busting version for an asset: the file's own modification time.
+ *
+ * A hardcoded version string means an updated widget can sit behind WordPress,
+ * WP Rocket, or Cloudflare caches indefinitely — visitors keep running the old
+ * script. Since the session id now lives only in page memory, a stale copy is
+ * not cosmetic: it would keep the previous sessionStorage behaviour alive and
+ * silently break the refresh-isolation guarantee. Keying on filemtime means the
+ * URL changes the moment the file does.
+ */
+function siddh_guide_chat_asset_version($relative_path) {
+  $full_path = SIDDH_GUIDE_CHAT_PLUGIN_PATH . $relative_path;
+  $mtime = @filemtime($full_path);
+
+  return $mtime ? (string) $mtime : '1.0.0';
+}
+
 function siddh_guide_chat_enqueue_assets() {
   wp_enqueue_style(
     'siddh-guide-chat-style',
     SIDDH_GUIDE_CHAT_PLUGIN_URL . 'assets/style.css',
     [],
-    null
+    siddh_guide_chat_asset_version('assets/style.css')
   );
 
   wp_enqueue_script(
     'siddh-guide-chat-widget',
     SIDDH_GUIDE_CHAT_PLUGIN_URL . 'assets/siddh-guide-chat-widget.js',
     [],
-    null,
+    siddh_guide_chat_asset_version('assets/siddh-guide-chat-widget.js'),
     true
   );
 }
@@ -170,11 +187,18 @@ add_action('wp_enqueue_scripts', 'siddh_guide_chat_enqueue_assets');
  * Change asset version query param from ?ver= to ?v=
  */
 function siddh_guide_chat_change_asset_version_param($src, $handle) {
-  $handles = ['siddh-guide-chat-widget', 'siddh-guide-chat-style'];
+  $map = [
+    'siddh-guide-chat-widget' => 'assets/siddh-guide-chat-widget.js',
+    'siddh-guide-chat-style'  => 'assets/style.css',
+  ];
 
-  if (in_array($handle, $handles, true)) {
+  if (isset($map[$handle])) {
+    // Carry the real file version across, otherwise this filter would undo the
+    // cache-busting done at enqueue time and pin every visitor to one URL.
+    $version = siddh_guide_chat_asset_version($map[$handle]);
     $src = remove_query_arg('ver', $src);
-    $src = add_query_arg('v', '1.0.0', $src);
+    $src = remove_query_arg('v', $src);
+    $src = add_query_arg('v', $version, $src);
   }
 
   return $src;

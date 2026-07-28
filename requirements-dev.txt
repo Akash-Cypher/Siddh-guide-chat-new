@@ -1,0 +1,11 @@
+# Test-only dependencies. NOT installed into the production image.
+#
+#   pip install -r requirements.txt -r requirements-dev.txt
+#   pytest tests
+#
+# httpx is what fastapi's TestClient runs on; without it the suite fails at
+# import. Everything else the tests need (fastapi, botocore) comes from
+# requirements.txt.
+
+pytest==9.1.1
+httpx==0.28.1

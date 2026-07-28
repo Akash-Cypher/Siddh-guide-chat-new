@@ -140,12 +140,26 @@
   border-color: #F58A08;
 }
 
+/* Busy state while an answer is being fetched. Only one request may be open at
+   a time, so the controls lock; without this styling the lock reads as the
+   widget having broken. */
+#userInput:disabled {
+  background: #f4f4f6;
+  color: #8a8a8a;
+  cursor: not-allowed;
+}
+
 .chat-input-form button {
   background: none;
   border: none;
   color: #F58A08;
   cursor: pointer;
   padding: 0 10px;
+}
+
+.chat-input-form button:disabled {
+  color: #d5b48a;
+  cursor: not-allowed;
 }
 
 .chat-input-form button svg {

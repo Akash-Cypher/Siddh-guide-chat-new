@@ -1,169 +1,192 @@
-Ask Sid Chat Widget – WordPress Integration Guide
+Ask Sid — WordPress Integration Guide
+=====================================
 
 Hi Team,
 
-Please follow the steps below to integrate the Ask Sid Chat Widget into the website.
+Ask Sid is the chat assistant for the Siddhanta website. It ships as a single
+WordPress plugin. The plugin renders the chat widget AND acts as a secure proxy
+to our AWS backend, so the API key never reaches the browser.
 
-This chatbot connects WordPress to our AWS backend securely through a proxy plugin.
+You will receive two things:
 
-1️⃣ Install the Proxy Plugin
+  1. siddh-guide-chat.zip   <- the plugin
+  2. the API key            <- sent separately, never in the same message
 
-This plugin connects WordPress to the chatbot backend securely.
+Total setup time: about 10 minutes.
 
-Create this folder
-wp-content/plugins/siddh-guide-chat-proxy/
-Upload this file inside that folder
-siddh-guide-chat-proxy.php
-Then activate it
 
-Go to:
+--------------------------------------------------------------------------
+1. INSTALL THE PLUGIN
+--------------------------------------------------------------------------
 
-WordPress Admin → Plugins
+WordPress Admin -> Plugins -> Add New -> Upload Plugin
 
-Activate:
+  - Choose siddh-guide-chat.zip
+  - Install Now
+  - Activate
 
-Ask Sid
-2️⃣ Add API Key (Important)
+The plugin appears in the list as "Ask Sid".
 
-Open the WordPress configuration file:
+Do NOT unzip it manually into wp-content/plugins/. Upload the .zip as-is.
+Do NOT copy any files into the theme. Earlier versions of this guide asked for
+that; it is no longer needed and will cause the scripts to load twice.
 
-wp-config.php
 
-Add this line near the bottom:
+--------------------------------------------------------------------------
+2. ADD THE API KEY
+--------------------------------------------------------------------------
 
-define('SIDDH_CHAT_API_KEY', '<<API KEY WILL BE SHARED PRIVATELY>>');
+Open wp-config.php and add this line ABOVE the line that says
+/* That's all, stop editing! */
 
-⚠️ Important
+  define('SIDDH_CHAT_API_KEY', 'PASTE-THE-KEY-HERE');
 
-Do NOT place the API key inside JavaScript.
+Important:
+  - The key must stay server-side. Never put it in JavaScript, a page, or a
+    theme file.
+  - Do not commit wp-config.php to any public repository.
 
-The key must remain server-side only.
+Alternative (less secure, use only if you cannot edit wp-config.php):
+  WordPress Admin -> Ask Sid KB -> Settings -> paste the key -> Save.
 
-3️⃣ Upload Widget Files to Theme
 
-Inside the active theme, create this folder:
+--------------------------------------------------------------------------
+3. PUT THE WIDGET ON THE SITE
+--------------------------------------------------------------------------
 
-wp-content/themes/<active-theme>/assets/siddh-chat/
+Edit the page where the chat bubble should appear (normally the landing page).
 
-Upload these files into that folder:
+Add a Shortcode block containing exactly:
 
-siddh-guide-chat-widget.js
-style.css
-siddhanta-logo.png
+  [siddh_guide_chat]
 
-Do NOT upload them as a separate page or open the HTML file directly.
+Save/Update the page.
 
-4️⃣ Load the Widget Files
+That is the whole integration. The plugin loads its own CSS and JavaScript --
+there is nothing to add to functions.php and no HTML to paste anywhere.
 
-Open the theme file:
+To show the bubble on every page instead, add the shortcode to the footer
+template or a footer widget area.
 
-functions.php
 
-Add this code:
+--------------------------------------------------------------------------
+4. CLEAR CACHES
+--------------------------------------------------------------------------
 
-function siddh_guide_chat_assets() {
+If the site uses WP Rocket, LiteSpeed, W3 Total Cache, Cloudflare, or similar:
 
-  wp_enqueue_style(
-    'siddh-guide-chat-css',
-    get_stylesheet_directory_uri() . '/assets/siddh-chat/style.css',
-    [],
-    null
-  );
+  Purge the FULL page cache after installing.
 
-  wp_enqueue_script(
-    'siddh-guide-chat-js',
-    get_stylesheet_directory_uri() . '/assets/siddh-chat/siddh-guide-chat-widget.js',
-    [],
-    null,
-    true
-  );
+Why this matters: the plugin versions its own asset URLs automatically, so an
+updated script gets a fresh URL. But the cached PAGE still points at the old
+URL until the page cache is purged. Purge once after install and after every
+plugin update.
 
-}
 
-add_action('wp_enqueue_scripts', 'siddh_guide_chat_assets');
+--------------------------------------------------------------------------
+5. TEST IT
+--------------------------------------------------------------------------
 
-function siddh_guide_chat_change_asset_version_param($src, $handle) {
-  $handles = ['siddh-guide-chat-js', 'siddh-guide-chat-css'];
+Open the page in a normal browser window and check each of these:
 
-  if (in_array($handle, $handles, true)) {
-    $src = remove_query_arg('ver', $src);
-    $src = add_query_arg('v', '1.0.0', $src);
-  }
+  [ ] The orange chat bubble appears at the bottom-right.
+  [ ] Type "hello" -> you get a greeting back.
+  [ ] Ask "how many courses are there" -> you get a number.
+  [ ] Ask "who are you" -> it answers "I'm Ask Sid ...".
 
-  return $src;
-}
-add_filter('script_loader_src', 'siddh_guide_chat_change_asset_version_param', 10, 2);
-add_filter('style_loader_src', 'siddh_guide_chat_change_asset_version_param', 10, 2);
+Then check the conversation memory:
 
-This loads the chatbot CSS and JavaScript on the website.
+  [ ] Say "I am an engineer."
+  [ ] Then "Suggest me a course."      -> should use your engineering background
+  [ ] Then "Why did you select that course?"  -> should explain the choice
+  [ ] Then "What is its duration?"     -> should answer for the same course
 
-5️⃣ Add the Chat Widget HTML
+Then check that a refresh starts fresh (this is intended behaviour):
 
-Open the Landing Page in the WordPress editor.
+  [ ] Press F5 to reload the page.
+  [ ] Ask "What is my stream?"
+      -> Expected: "I don't know your stream yet. Please tell me your field or
+         background."
+      -> It must NOT say engineering. Each page load is a new conversation.
 
-Add a Custom HTML block.
 
-Paste the contents of:
+--------------------------------------------------------------------------
+HOW THE CONVERSATION WORKS (please do not "fix" this)
+--------------------------------------------------------------------------
 
-siddh-guide-chat-widget.html
+A conversation lasts exactly as long as the loaded page.
 
-inside that block.
+  - Closing and reopening the chat bubble KEEPS the conversation.
+  - Refreshing the page STARTS A NEW conversation.
+  - A second tab is a SEPARATE conversation.
+  - Nothing is stored in the visitor's browser. There is no "New Chat" button
+    and no previous transcript is ever restored.
 
-⚠️ Important
+This is deliberate, for privacy: a shared or public computer must never show
+the previous visitor's chat.
 
-Update the logo path if required.
 
-Example:
+--------------------------------------------------------------------------
+KEEPING ANSWERS UP TO DATE
+--------------------------------------------------------------------------
 
-<img src="/wp-content/themes/<active-theme>/assets/siddh-chat/siddhanta-logo.png">
-6️⃣ Clear Cache
+Ask Sid answers only from the website and course catalog. When content changes
+it needs to re-read the site.
 
-If the site uses caching (WP Rocket / Cloudflare / etc):
+This happens automatically:
+  - about 90 seconds after you publish or update a page, post, or course
+  - once a day
 
-Please clear the cache after uploading the files.
+To force it immediately:
+  WordPress Admin -> Ask Sid KB -> "Update Chatbot Knowledge Now"
 
-7️⃣ Test the Chatbot
+Give it about a minute, then reload a page and ask about the new content.
 
-Visit the landing page.
 
-You should see the chat bubble in the bottom-right corner.
+--------------------------------------------------------------------------
+TROUBLESHOOTING
+--------------------------------------------------------------------------
 
-Test with:
+Bubble does not appear
+  - Is the "Ask Sid" plugin Activated?
+  - Is the [siddh_guide_chat] shortcode on the page?
+  - Purge the page cache.
+  - Open F12 -> Console and check for errors.
 
-hello
+Bubble appears but every answer is an error
+  - The API key is probably missing or wrong.
+  - Check Ask Sid KB -> the status line should read "API key configured".
 
-Expected result:
+"I can help with Siddhanta course and website information..."
+  - This is the intended reply when the question is outside the website
+    content. It is not an error.
+  - If it happens for content that IS on the site, run
+    "Update Chatbot Knowledge Now".
 
-The chatbot should reply with a welcome message.
+Answers forget the previous message
+  - Confirm you did not reload the page between messages (a reload always
+    starts a new conversation - that is by design).
+  - If it happens without a reload, tell us: it means the backend could not
+    reach its conversation store, which we can see in our logs.
 
-Expected Request Flow
 
-The browser will send requests to:
+--------------------------------------------------------------------------
+TECHNICAL REFERENCE (for the developer only)
+--------------------------------------------------------------------------
 
-/wp-json/siddh/v1/chat
+Plugin name       Ask Sid  (folder: siddh-guide-chat)
+Shortcode         [siddh_guide_chat]
+Admin screen      Ask Sid KB
+Browser calls     POST /wp-json/siddh/v1/chat
+                  (the plugin adds the API key and forwards it to AWS)
+wp-config keys    SIDDH_CHAT_API_KEY       (required)
+                  SIDDH_CHAT_BACKEND_URL   (optional, overrides the default)
 
-The proxy plugin forwards it to the AWS backend.
+Files in the package
+  siddh-guide-chat.zip
+    siddh-guide-chat/siddh-guide-chat.php
+    siddh-guide-chat/assets/siddh-guide-chat-widget.js
+    siddh-guide-chat/assets/style.css
+    siddh-guide-chat/assets/siddhanta-logo.png
 
-If Something Looks Wrong
-
-Please verify:
-
-Plugin is activated
-
-JS file is loaded
-
-CSS file is loaded
-
-API key exists in wp-config.php
-
-Files Included in Package
-siddh-guide-chat-proxy.php
-siddh-guide-chat-widget.js
-siddh-guide-chat-widget.html
-style.css
-siddhanta-logo.png
-Important Note
-
-Please do not upload the widget HTML as a standalone page.
-
-It should only be inserted inside a page using a Custom HTML block.
+Nothing else needs to be uploaded anywhere.

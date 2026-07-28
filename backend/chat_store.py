@@ -1,4 +1,6 @@
+import itertools
 import logging
+import threading
 import time
 import uuid
 from typing import Dict, List, Optional
@@ -11,8 +13,25 @@ from config import AWS_BOTO_CONFIG, AWS_REGION, CHAT_TABLE, CHAT_TTL_DAYS
 
 logger = logging.getLogger("siddh_guide.chat_store")
 
+
+class ChatStoreError(RuntimeError):
+    """The conversation store could not be read or written.
+
+    Raised instead of returning an empty list, because "no history" and "history
+    unavailable" are different states: the first is a genuinely new conversation,
+    the second is an outage. Swallowing the difference makes every follow-up
+    silently lose its context while the API keeps reporting success.
+    """
+
+
 _dynamodb = None
 _table = None
+
+# Monotonic tiebreaker. Two writes inside the same millisecond would otherwise
+# sort by the random uuid suffix, which can invert a user/assistant pair and
+# corrupt the order history is replayed in.
+_seq_lock = threading.Lock()
+_seq_counter = itertools.count()
 
 
 def _get_table():
@@ -32,7 +51,12 @@ def _ttl_epoch() -> int:
 
 
 def _make_sort_key(ts_ms: int) -> str:
-    return f"{ts_ms:013d}#{uuid.uuid4().hex}"
+    # <ms>#<seq>#<uuid> — the millisecond keeps the existing ordering and key
+    # width, the sequence makes same-millisecond writes deterministic, and the
+    # uuid keeps the key unique across processes.
+    with _seq_lock:
+        seq = next(_seq_counter) % 1_000_000
+    return f"{ts_ms:013d}#{seq:06d}#{uuid.uuid4().hex}"
 
 
 def put_message(
@@ -72,8 +96,16 @@ def put_message(
 
     try:
         table.put_item(Item=item)
-    except ClientError:
-        logger.exception("put_message failed")
+    except ClientError as exc:
+        logger.error(
+            "CONTINUITY: put_message failed session=%s role=%s table=%s — "
+            "this turn will be missing from the conversation history",
+            session_id,
+            role,
+            CHAT_TABLE,
+            exc_info=True,
+        )
+        raise ChatStoreError("could not persist chat message") from exc
 
 
 def get_recent_messages(session_id: str, limit: int = 8) -> List[Dict]:
@@ -89,12 +121,20 @@ def get_recent_messages(session_id: str, limit: int = 8) -> List[Dict]:
             ScanIndexForward=False,
             Limit=max(1, limit),
         )
-    except ClientError:
-        logger.exception("get_recent_messages failed")
-        return []
+    except ClientError as exc:
+        logger.error(
+            "CONTINUITY: get_recent_messages failed session=%s table=%s — "
+            "follow-ups in this session cannot be resolved",
+            session_id,
+            CHAT_TABLE,
+            exc_info=True,
+        )
+        raise ChatStoreError("could not read chat history") from exc
 
     items = resp.get("Items", [])
-    items.sort(key=lambda x: (x.get("ts", 0), x.get("sk", "")))
+    # Oldest-first, so the model receives the conversation in the order it
+    # happened. DynamoDB returned it newest-first (ScanIndexForward=False).
+    items.sort(key=lambda x: (int(x.get("ts", 0) or 0), str(x.get("sk", ""))))
     return items
 
 

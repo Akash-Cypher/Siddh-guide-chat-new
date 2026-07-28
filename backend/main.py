@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import logging
 import re
@@ -12,7 +13,12 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from chat_store import get_recent_messages, history_to_model_messages, put_message
+from chat_store import (
+    ChatStoreError,
+    get_recent_messages,
+    history_to_model_messages,
+    put_message,
+)
 from config import (
     ALLOWED_ORIGINS,
     ALLOW_DEFAULT_SESSION,
@@ -43,6 +49,13 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 logger = logging.getLogger("siddh_guide")
+
+# Per-request flag: set when the conversation store could not be read or written.
+# Surfaced to the caller as response["continuity"] == "degraded" so an outage is
+# observable from the outside without leaking any internal detail.
+_continuity_degraded: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "continuity_degraded", default=False
+)
 
 faq_data: list[dict] = []
 COURSE_DATA: list[dict] = []
@@ -131,6 +144,14 @@ ABOUT_BOT_KEYWORDS = [
     "how will you assist me",
     "about you",
     "about ask sid",
+    # Direct name questions. Without these the bot cannot state its own name:
+    # they fall through to RAG, the KB has nothing about the assistant, and the
+    # visitor gets the generic refusal.
+    "your name",
+    "call you",
+    "introduce yourself",
+    "who is ask sid",
+    "are you ask sid",
     # Old name kept so visitors who still say it are recognised.
     "about siddh guide",
 ]
@@ -750,12 +771,22 @@ def _retrieve_validated_context(
     return context, citations
 
 
-def _answer_supported_by_context(answer: str, context: str) -> bool:
+def _answer_supported_by_context(
+    answer: str, context: str, extra_allowed_tokens: frozenset = frozenset()
+) -> bool:
+    """Is every content word in the answer traceable to the retrieved context?
+
+    `extra_allowed_tokens` carries words the *user* supplied this session (e.g.
+    "engineering" after "I am an engineer"). Echoing the user's own word back is
+    not a hallucination, so it must not trip the grounding check — but it widens
+    nothing else: course facts, numbers and codes are still matched against the
+    KB context alone, below.
+    """
     if _looks_like_idk(answer) or not context.strip():
         return False
 
     context_text = context.lower()
-    context_tokens = set(re.findall(r"[a-z0-9]+", context_text))
+    context_tokens = set(re.findall(r"[a-z0-9]+", context_text)) | set(extra_allowed_tokens)
     answer_tokens = _content_tokens(answer, ANSWER_VALIDATION_STOP_WORDS)
 
     if answer_tokens:
@@ -796,6 +827,8 @@ def _generated_answer_or_refusal(
     context: str,
     citations: list[str],
     history_messages: list[dict],
+    session_context: str = "",
+    extra_allowed_tokens: frozenset = frozenset(),
 ) -> tuple[str, bool]:
     if not context or not citations:
         return REFUSAL_MESSAGE, False
@@ -804,10 +837,13 @@ def _generated_answer_or_refusal(
         user_message=user_message,
         context=context,
         history_messages=history_messages,
+        session_context=session_context,
     )
     answer = _strip_embedded_refusal(answer)
 
-    if not _answer_supported_by_context(answer, context):
+    if not _answer_supported_by_context(
+        answer, context, extra_allowed_tokens=extra_allowed_tokens
+    ):
         return REFUSAL_MESSAGE, False
 
     return answer, True
@@ -997,10 +1033,6 @@ _FOLLOWUP_ATTR_RE = re.compile(
     r"tell me more|more details?|know more|level)\b",
     re.I,
 )
-# Matches the sentence produced by the course-summary builder below. The old
-# "Sidh Guide" wording stays accepted so sessions started before the rename
-# still resolve follow-ups from their stored history.
-_LISTED_AS_COURSE_RE = re.compile(r"^(.{4,120}?)\s+is listed as an? (?:Ask Sid|Sidh Guide)", re.I)
 
 
 def is_followup_about_previous(message: str) -> bool:
@@ -1490,7 +1522,51 @@ def _response(
         "context_used": context_used,
         "citations": citations or [],
         "request_id": request_id,
+        # "degraded" means this turn was not fully recorded / history was not
+        # readable, so follow-ups may not resolve. Never claim "ok" in that case.
+        "continuity": "degraded" if _continuity_degraded.get() else "ok",
     }
+
+
+def _safe_put_message(**kwargs) -> bool:
+    """Persist a turn. Returns False and flags the request as degraded on failure.
+
+    A failed write must not 500 the visitor — they still get their answer — but
+    it must never be silent either, because the next turn in this session will
+    be missing context because of it.
+    """
+    try:
+        put_message(**kwargs)
+        return True
+    except ChatStoreError:
+        # chat_store already logged the cause with a stack trace.
+        _continuity_degraded.set(True)
+        return False
+    except Exception:
+        logger.exception(
+            "CONTINUITY: unexpected chat-store write failure session=%s role=%s",
+            kwargs.get("session_id"),
+            kwargs.get("role"),
+        )
+        _continuity_degraded.set(True)
+        return False
+
+
+def _load_recent_messages(session_id: str, limit: int) -> list[dict]:
+    """Ordered history for exactly this session, or [] with the request flagged."""
+    try:
+        return get_recent_messages(session_id=session_id, limit=limit)
+    except ChatStoreError:
+        # chat_store already logged the cause; flag it so the response cannot
+        # claim continuity that did not happen.
+        _continuity_degraded.set(True)
+        return []
+    except Exception:
+        logger.exception(
+            "CONTINUITY: unexpected chat-store read failure session=%s", session_id
+        )
+        _continuity_degraded.set(True)
+        return []
 
 
 def _store_assistant_message(
@@ -1500,7 +1576,7 @@ def _store_assistant_message(
     sources: list[str],
     context_used: int,
 ) -> None:
-    put_message(
+    _safe_put_message(
         session_id=session_id,
         role="assistant",
         text=answer,
@@ -1557,6 +1633,234 @@ _REC_GENERIC_TOKENS = {
 }
 
 
+# --------------------------------------------------------------------------- #
+# Temporary current-session context.
+#
+# Facts the visitor states about themselves ("I am an engineer") are used to
+# personalise recommendations and follow-up explanations for the remainder of
+# the loaded page, and nothing more. They are:
+#   - derived deterministically here rather than left to the model to infer;
+#   - read only from messages carrying the current session_id, so a refreshed
+#     page (new id) starts genuinely blank;
+#   - never treated as KB facts — course names, fees, duration, eligibility and
+#     links still come only from the catalog/KB.
+# --------------------------------------------------------------------------- #
+
+# Occupation words that imply a study field. Kept small and explicit; anything
+# unrecognised falls through to the free-text patterns below.
+_ROLE_TO_FIELD = {
+    "engineer": "engineering",
+    "engineering": "engineering",
+    "teacher": "education",
+    "lecturer": "education",
+    "professor": "education",
+    "doctor": "medicine",
+    "nurse": "healthcare",
+    "lawyer": "law",
+    "advocate": "law",
+    "architect": "architecture",
+    "accountant": "commerce",
+    "manager": "management",
+    "designer": "design",
+    "farmer": "agriculture",
+    "scientist": "science",
+    "developer": "software",
+    "programmer": "software",
+    "artist": "arts",
+    "musician": "music",
+    "psychologist": "psychology",
+}
+
+# Trailing noise to trim off a captured field ("engineering student" -> "engineering").
+_FIELD_TAIL_RE = re.compile(
+    r"\b(student|students|graduate|graduates|background|degree|field|stream|"
+    r"course|courses|major|professional|guy|person)\b.*$",
+    re.I,
+)
+
+_FIELD_PATTERNS = [
+    # "I am an engineer", "I'm a teacher"
+    re.compile(
+        r"\bi\s*(?:am|'m|m)\s+(?:an?\s+)?(" + "|".join(_ROLE_TO_FIELD) + r")\b",
+        re.I,
+    ),
+    # "my stream is commerce", "my background is in law", "my field: design"
+    re.compile(
+        r"\bmy\s+(?:stream|field|background|subject|discipline|domain|branch|major)\s*"
+        r"(?:is|was|:)?\s*(?:in\s+)?([a-z][a-z &/'-]{2,40})",
+        re.I,
+    ),
+    # "I study architecture", "I studied commerce"
+    re.compile(r"\bi\s+(?:study|studied|am\s+studying)\s+([a-z][a-z &/'-]{2,40})", re.I),
+    # "I work in finance", "I work as an architect"
+    re.compile(
+        r"\bi\s+work\s+(?:in|as)\s+(?:an?\s+)?([a-z][a-z &/'-]{2,40})", re.I
+    ),
+    # "I am from an engineering background"
+    re.compile(r"\bfrom\s+(?:an?\s+)?([a-z][a-z &/'-]{2,40})\s+background\b", re.I),
+    # "I am an engineering student" (role word not in the map, but field-shaped)
+    re.compile(r"\bi\s*(?:am|'m|m)\s+(?:an?\s+)?([a-z][a-z &/'-]{2,40})\s+student\b", re.I),
+]
+
+_INTEREST_PATTERNS = [
+    re.compile(r"\b(?:i\s*(?:am|'m|m)\s+)?interested\s+in\s+([a-z][a-z &/'-]{2,40})", re.I),
+    re.compile(r"\bi\s+(?:like|love|enjoy)\s+([a-z][a-z &/'-]{2,40})", re.I),
+]
+
+# Format/style preferences ("I prefer a short course"). Recorded so the model can
+# honour them, but deliberately NOT used to pick the recommendation subject —
+# "short" is not a field of study.
+_PREFERENCE_PATTERNS = [
+    re.compile(r"\bi\s+(?:prefer|want|need|am\s+looking\s+for)\s+([a-z][a-z &/'-]{2,40})", re.I),
+]
+
+
+def _clean_field(raw: str) -> str:
+    field = _FIELD_TAIL_RE.sub("", (raw or "")).strip(" .,:;!?-&/'")
+    field = re.sub(r"^(?:a|an|the|some|any)\s+", "", field.strip(), flags=re.I)
+    field = re.sub(r"\s+", " ", field)
+    # Reject filler captures like "interested", "looking", "not sure".
+    if len(field) < 3 or field.lower() in _REC_GENERIC_TOKENS:
+        return ""
+    if field.lower() in {"interested", "looking", "sure", "not", "the", "a", "an"}:
+        return ""
+    return _ROLE_TO_FIELD.get(field.lower(), field.lower())
+
+
+def _session_profile(recent_messages: Optional[list[dict]]) -> dict:
+    """Temporary preferences stated by the user in THIS session.
+
+    Returns {"field": str, "interests": [str], "preferred_course": str}. Scans
+    newest-first so a newly stated field replaces an earlier one.
+    """
+    profile = {"field": "", "interests": [], "preferences": [], "preferred_course": ""}
+    if not recent_messages:
+        return profile
+
+    for m in reversed(recent_messages):
+        role = (m.get("role") or "").strip().lower()
+        text = (m.get("text") or "").strip()
+        if not text:
+            continue
+
+        # Course under discussion: taken from either side of the conversation,
+        # but only ever accepted if it is a real catalog title.
+        if not profile["preferred_course"] and COURSE_CATALOG:
+            for c in COURSE_CATALOG:
+                title = (c.get("title") or "").strip()
+                if title and title.lower() in text.lower():
+                    profile["preferred_course"] = title
+                    break
+
+        # Self-described facts come from the user only. Assistant text is model
+        # output and must never become a "fact about the user".
+        if role != "user":
+            continue
+
+        if not profile["field"]:
+            for pattern in _FIELD_PATTERNS:
+                found = pattern.search(text)
+                if found:
+                    field = _clean_field(found.group(1))
+                    if field:
+                        profile["field"] = field
+                        break
+
+        for pattern in _INTEREST_PATTERNS:
+            for found in pattern.finditer(text):
+                interest = _clean_field(found.group(1))
+                if interest and interest not in profile["interests"]:
+                    profile["interests"].append(interest)
+
+        for pattern in _PREFERENCE_PATTERNS:
+            for found in pattern.finditer(text):
+                pref = _clean_field(found.group(1))
+                if pref and pref not in profile["preferences"]:
+                    profile["preferences"].append(pref)
+
+    return profile
+
+
+# "What is my stream?" — a question about what the visitor told us in THIS
+# session. It is never a KB question, so it must not reach retrieval: on a fresh
+# page there is nothing to recall and the honest answer is to say so.
+_ASK_OWN_PROFILE_RE = re.compile(
+    r"\b(?:what|which|do you (?:know|remember))\b[^.?!]{0,30}\bmy\b[^.?!]{0,20}"
+    r"\b(stream|field|background|subject|discipline|branch|profession|occupation)\b"
+    r"|\bwhat\s+did\s+i\s+(?:say|tell)\b",
+    re.I,
+)
+
+_UNKNOWN_PROFILE_REPLY = (
+    "I don’t know your stream yet. Please tell me your field or background."
+)
+
+
+# "which course suits my background?" mentions the background but is asking for a
+# course, not for what we remember. Anything naming a course/program is routed
+# normally so the recommendation and RAG paths keep those questions.
+_MENTIONS_COURSE_RE = re.compile(
+    r"\b(course|courses|program|programs|programme|programmes|class|classes|"
+    r"certificate|certification|syllabus)\b",
+    re.I,
+)
+
+
+def is_own_profile_question(message: str) -> bool:
+    msg = _norm(message)
+    if not _ASK_OWN_PROFILE_RE.search(msg):
+        return False
+    if _MENTIONS_COURSE_RE.search(msg):
+        return False
+    return True
+
+
+def _own_profile_answer(profile: dict) -> str:
+    if profile.get("field"):
+        return (
+            f"You told me your field is {profile['field']}. Tell me if that has "
+            "changed and I'll use the new one."
+        )
+    if profile.get("interests"):
+        return (
+            f"You haven't told me your stream, but you mentioned an interest in "
+            f"{profile['interests'][0]}. What is your field or background?"
+        )
+    return _UNKNOWN_PROFILE_REPLY
+
+
+def _session_context_block(profile: dict) -> str:
+    """Render the profile for the model, clearly labelled as untrusted and temporary."""
+    bits = []
+    if profile.get("field"):
+        bits.append(f"- Stated field/background: {profile['field']}")
+    if profile.get("interests"):
+        bits.append(f"- Stated interests: {', '.join(profile['interests'][:4])}")
+    if profile.get("preferences"):
+        bits.append(f"- Stated preferences: {', '.join(profile['preferences'][:4])}")
+    if profile.get("preferred_course"):
+        bits.append(f"- Course currently under discussion: {profile['preferred_course']}")
+    if not bits:
+        return ""
+    return (
+        "TEMPORARY CURRENT-SESSION DETAILS (stated by the user in this "
+        "conversation; use only to personalise wording and course selection, "
+        "never as factual course information):\n" + "\n".join(bits)
+    )
+
+
+def _profile_allowed_tokens(profile: dict) -> frozenset:
+    """Tokens the user themselves supplied, so echoing them is not a hallucination."""
+    words: set[str] = set()
+    for value in [profile.get("field", ""), profile.get("preferred_course", "")] + list(
+        profile.get("interests") or []
+    ):
+        for token in re.findall(r"[a-z0-9]+", str(value).lower()):
+            if len(token) > 2:
+                words.add(token)
+    return frozenset(words)
+
+
 def _is_recommendation_request(message: str) -> bool:
     if not _RECOMMEND_VERB_RE.search(_norm(message)):
         return False
@@ -1572,23 +1876,60 @@ def _recommendation_subject_terms(message: str) -> list[str]:
     return [t for t in _tokenize_query(message) if t not in _REC_GENERIC_TOKENS]
 
 
+def _resolve_recommendation_subject(
+    message: str, profile: dict
+) -> tuple[list[str], str]:
+    """(subject terms, where it came from) for a recommendation request.
+
+    Priority, per the required behaviour:
+      1. a subject named explicitly in the current request — a fresh topic must
+         never be overridden by an older one;
+      2. otherwise the most recent field/interest stated in this session, so
+         "suggest me a course" after "I am an engineer" recommends for
+         engineering;
+      3. otherwise nothing, and the caller asks the user for their field.
+    """
+    explicit = _recommendation_subject_terms(message)
+    if explicit:
+        return explicit, "request"
+
+    if profile.get("field"):
+        return _tokenize_query(profile["field"]) or [profile["field"]], "session"
+
+    if profile.get("interests"):
+        first = profile["interests"][0]
+        return _tokenize_query(first) or [first], "session"
+
+    return [], "none"
+
+
 def _recommend_courses_response(
     user_message: str,
     history_messages: list[dict],
     session_id: str,
     request_id: str,
+    recent_messages: Optional[list[dict]] = None,
 ) -> Dict:
     if not COURSE_CATALOG:
-        return _rag_answer_response(user_message, history_messages, session_id, request_id)
+        return _rag_answer_response(
+            user_message,
+            history_messages,
+            session_id,
+            request_id,
+            recent_messages=recent_messages,
+        )
 
-    # No subject named -> ask for one instead of refusing.
-    if not _recommendation_subject_terms(user_message):
+    profile = _session_profile(recent_messages)
+    subject_terms, subject_source = _resolve_recommendation_subject(user_message, profile)
+
+    # No subject in the request AND none stated earlier this session -> ask.
+    if not subject_terms:
         answer = (
             "Sure — which subject or field are you interested in? For example: "
             "management, law, architecture, Sanskrit, agriculture, psychology, or "
             "education. Tell me the area and I'll suggest matching courses."
         )
-        put_message(
+        _safe_put_message(
             session_id=session_id, role="assistant", text=answer,
             request_id=request_id, sources=["local"], context_used=0,
         )
@@ -1606,23 +1947,43 @@ def _recommend_courses_response(
         cat_text = ", ".join(str(x) for x in cats) if isinstance(cats, list) else str(cats)
         lines.append(f"- {title}" + (f" (categories: {cat_text})" if cat_text else ""))
 
+    session_block = _session_context_block(profile)
+
     context = (
         "[source=courses_catalog.json | Siksha course catalog]\n"
         f"User request: {user_message}\n"
-        "Available Siksha courses:\n" + "\n".join(lines)
+        + (f"Subject to match: {' '.join(subject_terms)}\n" if subject_terms else "")
+        + "Available Siksha courses:\n"
+        + "\n".join(lines)
     )
     citations = ["courses_catalog.json | Siksha live catalog"]
+
+    # When the subject came from earlier in the conversation rather than from
+    # this message, say so, so the reply reads as "based on your engineering
+    # background" instead of appearing to guess.
+    carried = (
+        f"The user did not repeat their field in this message. Earlier in this "
+        f"same conversation they said their field/interest is "
+        f"'{profile.get('field') or (profile.get('interests') or [''])[0]}'. "
+        f"Use that to choose the courses and refer to it naturally.\n"
+        if subject_source == "session"
+        else ""
+    )
 
     try:
         answer = generate_answer(
             user_message=(
                 f"The user asked for a course recommendation: {user_message}\n"
-                "From the Available Siksha courses listed in the context, choose the 1-3 "
+                + carried
+                + "From the Available Siksha courses listed in the context, choose the 1-3 "
                 "that best fit the user's subject, field, or interest, and briefly say why "
-                "each fits. Only name courses that appear in the list; never invent a course."
+                "each fits. Only name courses that appear in the list; never invent a course. "
+                "Do not promise jobs, salaries, or placement outcomes unless the context "
+                "states them."
             ),
             context=context,
             history_messages=history_messages,
+            session_context=session_block,
         )
     except Exception:
         logger.exception("[%s] recommendation generation failed", request_id)
@@ -1637,7 +1998,7 @@ def _recommend_courses_response(
     if _looks_like_idk(answer) or not names_real_course:
         return _refusal_response(session_id, request_id)
 
-    put_message(
+    _safe_put_message(
         session_id=session_id, role="assistant", text=answer,
         request_id=request_id, sources=["courses_catalog.json", "nova"], context_used=1,
     )
@@ -1677,6 +2038,48 @@ def _retrieval_query(user_message: str, recent_messages: Optional[list[dict]] = 
     return " ".join(tail) + ". " + user_message
 
 
+def _course_aware_answer(
+    user_message: str,
+    history_messages: list[dict],
+    recent_messages: Optional[list[dict]],
+    profile: dict,
+) -> Optional[tuple[str, list[str]]]:
+    """A course-specific answer for an FAQ-shaped follow-up, or None.
+
+    "How do I enroll?" straight after discussing a course should answer for THAT
+    course rather than giving the generic enrollment blurb. This deliberately
+    stores nothing and returns None on any miss, so the caller can fall back to
+    the curated FAQ and still write exactly one assistant turn — two writes would
+    corrupt the order history is replayed in.
+    """
+    course = profile.get("preferred_course") or ""
+    query = _retrieval_query(user_message, recent_messages)
+    if course and course.lower() not in query.lower():
+        query = f"{course}. {query}"
+
+    context, citations = _retrieve_validated_context(
+        query,
+        k=RAG_DEFAULT_K,
+        max_chars=RAG_MAX_CONTEXT_CHARS,
+        max_chunk_chars=RAG_MAX_CHUNK_CHARS,
+    )
+    if not context or not citations:
+        return None
+
+    answer, supported = _generated_answer_or_refusal(
+        user_message=user_message,
+        context=context,
+        citations=citations,
+        history_messages=history_messages,
+        session_context=_session_context_block(profile),
+        extra_allowed_tokens=_profile_allowed_tokens(profile),
+    )
+    if not supported:
+        return None
+
+    return answer, citations
+
+
 def _rag_answer_response(
     user_message: str,
     history_messages: list[dict],
@@ -1697,11 +2100,18 @@ def _rag_answer_response(
     if not context or not citations:
         return _refusal_response(session_id, request_id)
 
+    # Temporary details the user stated this session, so "why did you pick that
+    # course?" can be answered in terms of their background without those
+    # details ever becoming a source of course facts.
+    profile = _session_profile(recent_messages)
+
     answer, supported = _generated_answer_or_refusal(
         user_message=user_message,
         context=context,
         citations=citations,
         history_messages=history_messages,
+        session_context=_session_context_block(profile),
+        extra_allowed_tokens=_profile_allowed_tokens(profile),
     )
 
     if not supported:
@@ -1762,7 +2172,12 @@ def history(
 ) -> Dict:
     _check_api_key(x_api_key)
     sid = _validate_session_id(session_id)
-    msgs = get_recent_messages(session_id=sid, limit=50)
+    try:
+        msgs = get_recent_messages(session_id=sid, limit=50)
+    except ChatStoreError:
+        # Already logged with a stack trace. Report unavailability rather than
+        # an empty transcript, which would look like a valid empty session.
+        raise HTTPException(status_code=503, detail="history temporarily unavailable")
     return {"session_id": sid, "messages": msgs}
 
 
@@ -1773,6 +2188,7 @@ async def chat(
     x_api_key: Optional[str] = Header(default=None, alias="x-api-key"),
 ) -> Dict:
     request_id = str(uuid.uuid4())[:8]
+    _continuity_degraded.set(False)
 
     try:
         _check_api_key(x_api_key)
@@ -1798,7 +2214,9 @@ async def chat(
             len(user_message),
         )
 
-        recent_before = get_recent_messages(session_id=session_id, limit=HISTORY_LIMIT)
+        # Ordered turns for THIS session id only. A different page/tab generates
+        # a different id, so its turns are unreachable from here.
+        recent_before = _load_recent_messages(session_id, HISTORY_LIMIT)
         has_prior_history = len(recent_before) > 0
 
         history_messages = []
@@ -1808,7 +2226,7 @@ async def chat(
                 max_chars=MODEL_HISTORY_MAX_CHARS,
             )
 
-        put_message(
+        _safe_put_message(
             session_id=session_id,
             role="user",
             text=user_message,
@@ -1817,7 +2235,7 @@ async def chat(
 
         if is_greeting(user_message):
             answer = "Hello! How can I assist you today?"
-            put_message(
+            _safe_put_message(
                 session_id=session_id,
                 role="assistant",
                 text=answer,
@@ -1829,7 +2247,7 @@ async def chat(
 
         if is_about_bot(user_message):
             answer = ABOUT_BOT_REPLY
-            put_message(
+            _safe_put_message(
                 session_id=session_id,
                 role="assistant",
                 text=answer,
@@ -1841,7 +2259,7 @@ async def chat(
 
         if is_capability_question(user_message):
             answer = CAPABILITY_REPLY
-            put_message(
+            _safe_put_message(
                 session_id=session_id,
                 role="assistant",
                 text=answer,
@@ -1850,6 +2268,21 @@ async def chat(
                 context_used=0,
             )
             return _response(answer, ["local"], 0, request_id)
+
+        # "What is my stream?" is about this session, not the knowledge base.
+        # Answered from the current session's own turns, so a refreshed page
+        # (new session id, no turns) correctly says it does not know.
+        if is_own_profile_question(user_message):
+            answer = _own_profile_answer(_session_profile(recent_before))
+            _safe_put_message(
+                session_id=session_id,
+                role="assistant",
+                text=answer,
+                request_id=request_id,
+                sources=["session"],
+                context_used=0,
+            )
+            return _response(answer, ["session"], 0, request_id)
 
         # KB-only enforcement: legacy cache entries do not carry retrieval
         # context or citations, so they are not trusted as answer sources.
@@ -1876,7 +2309,7 @@ async def chat(
                 sources = ["courses.json"]
                 citations = ["courses.json"]
 
-            put_message(
+            _safe_put_message(
                 session_id=session_id,
                 role="assistant",
                 text=answer,
@@ -1905,7 +2338,7 @@ async def chat(
                         + "."
                     )
                 answer = " ".join(parts)
-                put_message(
+                _safe_put_message(
                     session_id=session_id,
                     role="assistant",
                     text=answer,
@@ -1957,7 +2390,7 @@ async def chat(
                 + "\n\nWhich one would you like details about?"
             )
 
-            put_message(
+            _safe_put_message(
                 session_id=session_id,
                 role="assistant",
                 text=answer,
@@ -1985,7 +2418,37 @@ async def chat(
         # brittle keyword-routing maze.
         faq_answer = get_faq_answer(user_message)
         if faq_answer:
-            put_message(
+            # When a course is already under discussion, an FAQ-shaped follow-up
+            # ("how do I enroll?") is really about THAT course. Try the
+            # course-specific answer first and fall back to the curated FAQ if
+            # retrieval cannot support one, so this is never worse than before.
+            profile = _session_profile(recent_before)
+            course_specific = None
+            if profile.get("preferred_course") and is_followup_about_previous(user_message):
+                try:
+                    course_specific = _course_aware_answer(
+                        user_message, history_messages, recent_before, profile
+                    )
+                except Exception:
+                    logger.exception(
+                        "[%s] course-aware FAQ attempt failed; using curated FAQ",
+                        request_id,
+                    )
+
+            if course_specific:
+                answer, citations = course_specific
+                sources = ["rag", "nova"]
+                _safe_put_message(
+                    session_id=session_id,
+                    role="assistant",
+                    text=answer,
+                    request_id=request_id,
+                    sources=sources,
+                    context_used=1,
+                )
+                return _response(answer, sources, 1, request_id, citations=citations)
+
+            _safe_put_message(
                 session_id=session_id,
                 role="assistant",
                 text=faq_answer,
@@ -2000,7 +2463,11 @@ async def chat(
         # no specific course named, so course-detail questions stay on RAG.
         if _is_recommendation_request(user_message):
             return _recommend_courses_response(
-                user_message, history_messages, session_id, request_id
+                user_message,
+                history_messages,
+                session_id,
+                request_id,
+                recent_messages=recent_before,
             )
 
         # RAG-first: every remaining question is answered by retrieving the most

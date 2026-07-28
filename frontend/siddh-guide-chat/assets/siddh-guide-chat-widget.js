@@ -9,26 +9,17 @@ document.addEventListener('DOMContentLoaded', () => {
     return 'sess_' + Math.random().toString(36).slice(2) + Date.now();
   }
 
-  // Keep one stable session id per browser tab so multi-turn continuity works
-  // (the backend threads follow-ups like "how much is it?" by session id).
-  // sessionStorage = one conversation per tab; survives reloads, clears when the
-  // tab is closed. Falls back to an in-memory id if storage is unavailable.
-  const SESSION_STORAGE_KEY = 'siddhGuideChatSessionId';
-
-  function loadSessionId() {
-    try {
-      let id = window.sessionStorage.getItem(SESSION_STORAGE_KEY);
-      if (!id) {
-        id = generateSessionId();
-        window.sessionStorage.setItem(SESSION_STORAGE_KEY, id);
-      }
-      return id;
-    } catch (e) {
-      return generateSessionId();
-    }
-  }
-
-  let SESSION_ID = loadSessionId();
+  // A conversation lives exactly as long as this loaded page.
+  //
+  // The id is generated once, here, and held ONLY in this closure variable. It is
+  // deliberately never written to localStorage or sessionStorage, so:
+  //   - every message from this page carries the same id (continuity);
+  //   - closing and reopening the bubble keeps that id (same page, same script);
+  //   - a refresh re-runs this script and produces a brand-new id (isolation);
+  //   - another page or tab runs its own script, so it gets its own id.
+  // Old turns stay in the backend until the DynamoDB TTL expires them, but a new
+  // page can never reach them because it never learns the previous id.
+  const SESSION_ID = generateSessionId();
 
   const chatToggleButton = document.getElementById('chatToggleButton');
   const chatWindow = document.getElementById('chatWindow');
@@ -36,6 +27,8 @@ document.addEventListener('DOMContentLoaded', () => {
   const chatForm = document.getElementById('chatForm');
   const userInput = document.getElementById('userInput');
   const chatMessages = document.getElementById('chatMessages');
+
+  const submitButton = chatForm.querySelector('button[type="submit"]');
 
   if (!chatToggleButton || !chatWindow || !proactiveMessage || !chatForm || !userInput || !chatMessages) {
     return;
@@ -60,17 +53,20 @@ document.addEventListener('DOMContentLoaded', () => {
     return messageElement;
   }
 
-  function clearMessages() {
-    chatMessages.innerHTML = '';
-  }
+  // Only one request may be in flight per widget. Without this, a visitor who
+  // submits twice quickly can have the two answers — and the two DynamoDB
+  // history writes — land out of order, which corrupts the follow-up context of
+  // every later turn in the conversation.
+  let requestInFlight = false;
 
-  function resetChatSession() {
-    clearMessages();
-    SESSION_ID = generateSessionId();
-    try {
-      window.sessionStorage.setItem(SESSION_STORAGE_KEY, SESSION_ID);
-    } catch (e) {
-      // storage unavailable — in-memory id still works for this page view
+  function setBusy(busy) {
+    requestInFlight = busy;
+    userInput.disabled = busy;
+    if (submitButton) {
+      submitButton.disabled = busy;
+    }
+    if (!busy) {
+      userInput.focus();
     }
   }
 
@@ -119,6 +115,7 @@ document.addEventListener('DOMContentLoaded', () => {
   async function fetchBotResponse(userMessage) {
     const botMessageElement = addMessage('...', 'bot');
     botMessageElement.classList.add('typing');
+    setBusy(true);
 
     try {
       const response = await fetch(`${API_BASE}/chat`, {
@@ -154,6 +151,10 @@ document.addEventListener('DOMContentLoaded', () => {
       console.error('Error fetching bot response:', error);
       botMessageElement.classList.remove('typing');
       botMessageElement.textContent = 'Sorry, something went wrong. Please try again.';
+    } finally {
+      // Always restore the controls — on success AND on failure — so a network
+      // error can never leave the widget permanently locked.
+      setBusy(false);
     }
   }
 
@@ -164,15 +165,19 @@ document.addEventListener('DOMContentLoaded', () => {
       stopProactiveMessaging();
       userInput.focus();
     } else {
-      // Closing the bubble should NOT start a new conversation — keep the same
-      // session so reopening continues the thread (continuity). A fresh chat is
-      // an explicit action via resetChatSession() if you add a "new chat" button.
+      // Closing the bubble does NOT end the conversation: SESSION_ID is bound to
+      // the page, not to the window being open, so reopening continues the same
+      // thread. Only a page refresh starts a new conversation.
       startProactiveMessaging();
     }
   });
 
   chatForm.addEventListener('submit', (e) => {
     e.preventDefault();
+
+    // Drop the submit outright while a request is open, so answers and their
+    // history writes cannot interleave.
+    if (requestInFlight) return;
 
     const messageText = userInput.value.trim();
     if (!messageText) return;

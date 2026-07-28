@@ -1,8 +1,32 @@
-fastapi
-uvicorn
-boto3
-pydantic
-chromadb
-posthog<6
-requests
-beautifulsoup4
+# Runtime dependencies for the Ask Sid backend.
+#
+# Pinned exactly so an image rebuilt months from now is the image you tested.
+# Unpinned, `docker build` resolves whatever is newest on the day it runs, and
+# chromadb in particular breaks across minor releases.
+#
+# These versions were verified together: every backend module imports cleanly
+# and the full test suite passes against them.
+#
+# IMPORTANT: verified on a developer machine, NOT captured from the running
+# App Runner container. Build and smoke-test a staging image before trusting
+# these in production - see the note at the bottom of this file.
+#
+# To change a version: bump it here, rebuild, run `pytest tests`, then deploy.
+
+fastapi==0.140.7
+uvicorn==0.51.0
+pydantic==2.13.4
+boto3==1.43.54
+chromadb==1.5.9
+posthog==5.4.0
+requests==2.34.2
+beautifulsoup4==4.15.0
+
+# Transitive dependencies are still resolved by pip. For a fully reproducible
+# build (every transitive package pinned too), generate the lock from a clean
+# container rather than from a developer machine:
+#
+#   docker build -t asksid-backend .
+#   docker run --rm asksid-backend pip freeze > requirements.lock.txt
+#
+# and then build with:  pip install --no-deps -r requirements.lock.txt
