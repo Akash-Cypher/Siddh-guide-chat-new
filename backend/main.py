@@ -105,8 +105,9 @@ VALIDATION_ALIASES = {
 }
 
 ANSWER_VALIDATION_STOP_WORDS = VALIDATION_TOKEN_STOP_WORDS | {
-    "available", "based", "content", "context", "course", "courses", "guide",
-    "information", "knowledge", "provided", "sidh", "siddh", "siddhanta", "the",
+    "ask", "available", "based", "content", "context", "course", "courses",
+    "guide", "information", "knowledge", "provided", "sid", "sidh", "siddh",
+    "siddhanta", "the",
 }
 
 GREETINGS = {
@@ -129,11 +130,13 @@ ABOUT_BOT_KEYWORDS = [
     "what can you do",
     "how will you assist me",
     "about you",
+    "about ask sid",
+    # Old name kept so visitors who still say it are recognised.
     "about siddh guide",
 ]
 
 ABOUT_BOT_REPLY = (
-    "I’m Siddh Guide — a helpful assistant by Siddhanta Knowledge Foundation. "
+    "I’m Ask Sid — a helpful assistant by Siddhanta Knowledge Foundation. "
     "I can help you explore IKS courses, suggest what fits your interests, "
     "and guide you to the right certified programs."
 )
@@ -226,7 +229,7 @@ LATEST_COURSE_RE = re.compile(
 )
 
 WHY_CHOOSE_SIDDHANTA_RE = re.compile(
-    r"\bwhy\b.*\b(choose|chose|select|study at|study with)\b.*\b(siddhanta|skf|sidh guide|siddh guide)\b"
+    r"\bwhy\b.*\b(choose|chose|select|study at|study with)\b.*\b(siddhanta|skf|ask sid|sidh guide|siddh guide)\b"
     r"|\bwhy\b.*\b(siddhanta|skf)\b",
     re.IGNORECASE,
 )
@@ -994,7 +997,10 @@ _FOLLOWUP_ATTR_RE = re.compile(
     r"tell me more|more details?|know more|level)\b",
     re.I,
 )
-_LISTED_AS_COURSE_RE = re.compile(r"^(.{4,120}?)\s+is listed as a Sidh Guide", re.I)
+# Matches the sentence produced by the course-summary builder below. The old
+# "Sidh Guide" wording stays accepted so sessions started before the rename
+# still resolve follow-ups from their stored history.
+_LISTED_AS_COURSE_RE = re.compile(r"^(.{4,120}?)\s+is listed as an? (?:Ask Sid|Sidh Guide)", re.I)
 
 
 def is_followup_about_previous(message: str) -> bool:
@@ -1371,7 +1377,7 @@ def _website_course_answer_for_entry(entry: dict, message: str) -> Optional[str]
             "button. It does not show detailed enrollment steps beyond that button."
         )
 
-    parts = [f"{title} is listed as a Sidh Guide/Siksha course."]
+    parts = [f"{title} is listed as an Ask Sid/Siksha course."]
     if duration:
         parts.append(f"Duration: {duration}.")
     if audience:
@@ -1865,7 +1871,7 @@ async def chat(
                     return _refusal_response(session_id, request_id)
                 answer = (
                     f"There are {len(titles)} courses available in the current "
-                    "Sidh Guide course database."
+                    "Ask Sid course database."
                 )
                 sources = ["courses.json"]
                 citations = ["courses.json"]

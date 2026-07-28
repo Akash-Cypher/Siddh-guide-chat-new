@@ -1,4 +1,4 @@
-# Siddh Guide Chatbot
+# Ask Sid Chatbot
 
 FastAPI + Chroma RAG chatbot for Siddhanta Knowledge, grounded strictly on the
 foundation's own websites (KB-only, no general-knowledge answers).

@@ -1,5 +1,5 @@
 """
-Local chat console for testing the LIVE production Siddh Guide chatbot.
+Local chat console for testing the LIVE production Ask Sid chatbot.
 
 Why this exists: the production backend only accepts the browser widget from
 siddhantaknowledge.org (CORS) and needs a secret API key. This tiny local server
@@ -27,7 +27,7 @@ API_KEY = "siddh-guide-2026-8f3c9b2a71e4d5c6f9a0"
 PORT = 8765
 
 PAGE = """<!doctype html>
-<html><head><meta charset="utf-8"><title>Siddh Guide — Local Test Console</title>
+<html><head><meta charset="utf-8"><title>Ask Sid — Local Test Console</title>
 <style>
   body{font-family:system-ui,Segoe UI,Arial,sans-serif;margin:0;background:#f4f4f6;color:#1a1a1a}
   header{background:#6b1f1f;color:#fff;padding:14px 18px;font-weight:600}
@@ -46,7 +46,7 @@ PAGE = """<!doctype html>
   #send:disabled{opacity:.5}
 </style></head>
 <body>
-<header>Siddh Guide — Local Test Console<small>Talking to LIVE production backend. Not on the live website.</small></header>
+<header>Ask Sid — Local Test Console<small>Talking to LIVE production backend. Not on the live website.</small></header>
 <div id="chat"></div>
 <div id="bar"><div class="wrap">
   <input id="q" placeholder="Ask about courses, blogs, events, enrollment…" autofocus>
@@ -74,7 +74,7 @@ async function ask(){
   send.disabled=false; q.focus();
 }
 send.onclick=ask; q.addEventListener('keydown',e=>{if(e.key==='Enter')ask();});
-add('bot','Hi! I am the Siddh Guide assistant (live production). Ask me anything — e.g. "how many courses are there".');
+add('bot','Hi! I am Ask Sid (live production). Ask me anything — e.g. "how many courses are there".');
 </script>
 </body></html>"""
 
@@ -128,7 +128,7 @@ if __name__ == "__main__":
     except Exception:
         pass
 
-    print("\n  Siddh Guide local test console")
+    print("\n  Ask Sid local test console")
     print(f"  Talking to: {BACKEND_URL}")
     print(f"\n  >> Open this in your browser:  http://localhost:{PORT}\n")
     print("  Press Ctrl+C to stop.\n")

@@ -28,7 +28,7 @@ BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 FAQ_PATH = DATA_DIR / "faq.json"
 
-APP_TITLE = os.getenv("APP_TITLE", "Siddh Guide Chatbot")
+APP_TITLE = os.getenv("APP_TITLE", "Ask Sid Chatbot")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
 AWS_REGION = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION") or "ap-south-1"
