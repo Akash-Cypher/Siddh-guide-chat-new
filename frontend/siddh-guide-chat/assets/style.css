@@ -1,31 +1,56 @@
+/* Launcher: a labelled pill, so the assistant is identifiable before it is
+   opened. Width is driven by the label, not fixed. */
 .chat-toggle-button {
   position: fixed;
   bottom: 20px;
   right: 20px;
-  width: 60px;
-  height: 60px;
+  height: 56px;
   background-color: #F58A08;
   color: #ffffff;
-  border-radius: 50%;
+  border-radius: 28px;
   border: none;
   cursor: pointer;
-  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.22);
   display: flex;
   justify-content: center;
   align-items: center;
+  gap: 9px;
   z-index: 9998;
-  transition: transform 0.2s ease;
-  padding: 0;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+  padding: 0 20px;
+  font-family: inherit;
+}
+
+.chat-toggle-button .chat-toggle-label {
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1;
+  white-space: nowrap;
+  letter-spacing: 0.01em;
+}
+
+.chat-toggle-button svg {
+  width: 26px;
+  height: 26px;
+  flex: 0 0 auto;
 }
 
 .chat-toggle-button:hover {
-  transform: scale(1.06);
+  transform: scale(1.04);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.28);
 }
 
+.chat-toggle-button:focus-visible {
+  outline: 3px solid #ffffff;
+  outline-offset: 2px;
+}
+
+/* Sits ABOVE the launcher rather than beside it, so the pill's width can grow
+   with the label without the two overlapping. */
 .proactive-message {
   position: fixed;
-  bottom: 35px;
-  right: 90px;
+  bottom: 88px;
+  right: 20px;
   background-color: #f0f0f0;
   color: #222222;
   padding: 10px 15px;
@@ -69,16 +94,17 @@
   font-weight: 700;
   display: flex;
   align-items: center;
-  justify-content: center;
-  padding: 12px 14px;
-  text-align: center;
+  justify-content: flex-start;
+  gap: 10px;
+  padding: 12px 16px;
+  text-align: left;
 }
 
 .chat-header img {
   width: 44px;
   height: 44px;
   object-fit: contain;
-  margin-right: 10px;
+  flex: 0 0 auto;
 }
 
 .chat-messages {
@@ -175,8 +201,27 @@
     height: 70vh;
   }
 
+  /* Slightly tighter pill on small screens; the label still fits comfortably. */
+  .chat-toggle-button {
+    right: 12px;
+    height: 50px;
+    border-radius: 25px;
+    padding: 0 16px;
+    gap: 8px;
+  }
+
+  .chat-toggle-button .chat-toggle-label {
+    font-size: 15px;
+  }
+
+  .chat-toggle-button svg {
+    width: 22px;
+    height: 22px;
+  }
+
   .proactive-message {
-    right: 80px;
-    max-width: 180px;
+    right: 12px;
+    bottom: 76px;
+    max-width: calc(100vw - 36px);
   }
 }
