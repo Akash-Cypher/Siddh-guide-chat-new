@@ -157,6 +157,7 @@ def test_release_zip_matches_the_sources():
 
     expected = {
         "siddh-guide-chat/siddh-guide-chat.php": PLUGIN_PHP,
+        "siddh-guide-chat/siddh-guide-chat-test.html": TEST_PAGE,
         "siddh-guide-chat/assets/siddh-guide-chat-widget.js": WIDGET_JS,
         "siddh-guide-chat/assets/style.css": WIDGET_JS.parent / "style.css",
         "siddh-guide-chat/assets/siddhanta-logo.png": WIDGET_JS.parent / "siddhanta-logo.png",
@@ -170,6 +171,14 @@ def test_release_zip_matches_the_sources():
             assert z.read(entry) == source.read_bytes(), (
                 f"{entry} in the zip is stale - rebuild it before handing over"
             )
+
+
+def test_bundled_test_page_is_not_indexable():
+    """It ships inside the plugin, so it is live-reachable. Keep it out of search."""
+    html = TEST_PAGE.read_text(encoding="utf-8")
+    assert re.search(
+        r'<meta\s+name="robots"\s+content="[^"]*noindex', html, re.I
+    ), "the bundled test page must carry a noindex robots meta"
 
 
 def test_asset_version_is_file_derived_not_hardcoded():
