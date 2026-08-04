@@ -3,6 +3,10 @@
 FastAPI + Chroma RAG chatbot for Siddhanta Knowledge, grounded strictly on the
 foundation's own websites (KB-only, no general-knowledge answers).
 
+> **WordPress side — plugin install, API key, shortcode, troubleshooting:**
+> see **[WORDPRESS-RUNBOOK.md](WORDPRESS-RUNBOOK.md)**.
+> This README covers the backend, crawler and AWS deployment.
+
 ## Architecture
 
 ```mermaid

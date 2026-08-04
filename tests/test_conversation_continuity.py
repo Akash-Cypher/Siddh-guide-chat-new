@@ -31,6 +31,9 @@ CATALOG = [
      "categories": ["language"], "published": "2025-03-05"},
     {"title": "Indic Business and Commerce Traditions",
      "categories": ["commerce", "management"], "published": "2025-04-02"},
+    # Mirrors the real catalog, which uses the "Arts and Humanities" category.
+    {"title": "Indian System of Creative Thinking and Music",
+     "categories": ["Arts and Humanities", "Management"], "published": "2025-05-01"},
 ]
 
 KB_DOC = (
@@ -635,6 +638,62 @@ def test_off_topic_is_still_refused_without_calling_the_model(client, monkeypatc
     out = ask(client, "what is the weather today", session="offtopic")
     assert out["status"] == "refused"
     assert out["answer"] == main.REFUSAL_MESSAGE
+
+
+# ------------------------------------------------------- typo tolerance
+
+@pytest.mark.parametrize(
+    "typed,expected_word",
+    [
+        ("can you suggesta course based on my background?", "suggest"),
+        ("why this coursde?", "course"),
+        ("courses on humainites", "humanities"),
+        ("pl update me avilable courses", "available"),
+        ("any course relevent to tamil language", "relevant"),
+        ("dureation of this course", "duration"),
+    ],
+)
+def test_common_misspellings_are_corrected_for_routing(monkeypatch, typed, expected_word):
+    monkeypatch.setattr(main, "COURSE_CATALOG", CATALOG)
+    assert expected_word in main._correct_typos(typed).lower()
+
+
+def test_punctuation_survives_correction(monkeypatch):
+    """The trailing '?' distinguishes a question from a statement downstream."""
+    monkeypatch.setattr(main, "COURSE_CATALOG", CATALOG)
+    assert main._correct_typos("why this coursde?").endswith("?")
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "what is the weather today",
+        "I am an engineer",
+        "how many courses are there",
+        "write me a poem",
+        "Harappan civilization",
+        "tell me about Ayurveda",
+    ],
+)
+def test_correct_text_is_left_alone(monkeypatch, message):
+    monkeypatch.setattr(main, "COURSE_CATALOG", CATALOG)
+    assert main._correct_typos(message).lower() == message.lower()
+
+
+def test_misspelled_request_reaches_the_recommendation_route(monkeypatch):
+    monkeypatch.setattr(main, "COURSE_CATALOG", CATALOG)
+    corrected = main._correct_typos("can you suggesta course based on my background?")
+    assert main._is_recommendation_request(corrected)
+
+
+def test_answer_uses_the_visitor_wording_not_the_correction(client, rec):
+    """Correction is for routing only - the model must see what was typed."""
+    rec.answer = "Indian Knowledge Systems for Engineers fits your background."
+    ask(client, "I am an engineer", session="typo")
+    ask(client, "suggesta course", session="typo")
+
+    sent = rec.calls[-1]["user_message"]
+    assert "suggesta" in sent, "the visitor's own wording must reach the model"
 
 
 def test_grounding_is_not_weakened_by_session_context(client, rec):

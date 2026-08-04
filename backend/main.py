@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import difflib
 import json
 import logging
 import re
@@ -407,6 +408,70 @@ app.add_middleware(
 
 def _norm(text: str) -> str:
     return " ".join((text or "").strip().split())
+
+
+# --------------------------------------------------------------------------- #
+# Typo tolerance for ROUTING ONLY.
+#
+# Visitors mistype constantly — "why this coursde?", "suggesta course",
+# "courses on humainites". The intent matchers are word-boundary regexes, so one
+# wrong letter drops the message all the way through to retrieval and it gets
+# refused. Correcting the text before the routing decision fixes a whole class of
+# failures at once.
+#
+# The corrected text is used ONLY to decide which route handles the message. The
+# visitor's original wording is what reaches the model, the knowledge-base
+# validation and the stored history, so this can never alter an answer's content.
+# --------------------------------------------------------------------------- #
+_ROUTING_VOCAB_BASE = {
+    "about", "access", "admission", "apply", "available", "background", "certificate",
+    "certification", "contact", "cost", "course", "courses", "duration", "eligibility",
+    "engineer", "engineering", "enroll", "enrol", "enrollment", "enrolment", "fee",
+    "fees", "help", "hours", "interested", "join", "learn", "list", "management",
+    "price", "program", "programs", "recommend", "recommendation", "register",
+    "relevant", "show", "siddhanta", "siksha", "stream", "subject", "suggest",
+    "suggestion", "syllabus", "there", "these", "those", "which", "would", "your",
+}
+
+
+def _routing_vocab() -> set:
+    """Base intent words plus every word from the live catalog titles/categories."""
+    vocab = set(_ROUTING_VOCAB_BASE)
+    for entry in COURSE_CATALOG or []:
+        parts = [entry.get("title") or ""]
+        cats = entry.get("categories") or []
+        parts += [str(c) for c in cats] if isinstance(cats, list) else [str(cats)]
+        for token in re.findall(r"[a-z]{4,}", " ".join(parts).lower()):
+            vocab.add(token)
+    return vocab
+
+
+def _correct_typos(text: str) -> str:
+    """Best-effort spelling correction of a message, for routing decisions only."""
+    msg = _norm(text)
+    if not msg:
+        return msg
+
+    vocab = _routing_vocab()
+    out = []
+    for token in msg.split():
+        bare = re.sub(r"[^a-zA-Z]", "", token).lower()
+        # Short tokens are too easy to "correct" into the wrong word.
+        if len(bare) < 5 or bare in vocab:
+            out.append(token)
+            continue
+        match = difflib.get_close_matches(bare, vocab, n=1, cutoff=0.86)
+        if not match:
+            out.append(token)
+            continue
+
+        # Swap the word but keep surrounding punctuation: "coursde?" -> "course?".
+        # The trailing "?" matters — other checks use it to tell a question from
+        # a statement.
+        parts = re.match(r"^([^a-zA-Z]*)([a-zA-Z]+)(.*)$", token)
+        out.append(parts.group(1) + match[0] + parts.group(3) if parts else match[0])
+
+    return " ".join(out)
 
 
 def _normalize_course_text(text: str) -> str:
@@ -2182,10 +2247,12 @@ def _rag_answer_response(
     session_id: str,
     request_id: str,
     recent_messages: Optional[list[dict]] = None,
+    routing_message: Optional[str] = None,
 ) -> Dict:
     # Retrieve against a history-aware query so follow-ups resolve, but always
-    # answer the user's actual message.
-    query = _retrieval_query(user_message, recent_messages)
+    # answer the user's actual message. Retrieval uses the spelling-corrected
+    # text — "why this coursde?" must still find the course under discussion.
+    query = _retrieval_query(routing_message or user_message, recent_messages)
     context, citations = _retrieve_validated_context(
         query,
         k=RAG_DEFAULT_K,
@@ -2323,6 +2390,15 @@ async def chat(
             len(user_message),
         )
 
+        # Spelling-corrected copy used ONLY to pick a route. Every answer, the
+        # KB validation and the stored history use the visitor's own wording.
+        routing_message = _correct_typos(user_message)
+        if routing_message.lower() != user_message.lower():
+            logger.info(
+                "[%s] routing on corrected text: %r -> %r",
+                request_id, user_message, routing_message,
+            )
+
         # Ordered turns for THIS session id only. A different page/tab generates
         # a different id, so its turns are unreachable from here.
         recent_before = _load_recent_messages(session_id, HISTORY_LIMIT)
@@ -2342,7 +2418,7 @@ async def chat(
             request_id=request_id,
         )
 
-        if is_greeting(user_message):
+        if is_greeting(routing_message):
             answer = "Hello! How can I assist you today?"
             _safe_put_message(
                 session_id=session_id,
@@ -2354,7 +2430,7 @@ async def chat(
             )
             return _response(answer, ["local"], 0, request_id)
 
-        if is_about_bot(user_message):
+        if is_about_bot(routing_message):
             answer = ABOUT_BOT_REPLY
             _safe_put_message(
                 session_id=session_id,
@@ -2366,7 +2442,7 @@ async def chat(
             )
             return _response(answer, ["local"], 0, request_id)
 
-        if is_capability_question(user_message):
+        if is_capability_question(routing_message):
             answer = CAPABILITY_REPLY
             _safe_put_message(
                 session_id=session_id,
@@ -2381,7 +2457,7 @@ async def chat(
         # "What is my stream?" is about this session, not the knowledge base.
         # Answered from the current session's own turns, so a refreshed page
         # (new session id, no turns) correctly says it does not know.
-        if is_own_profile_question(user_message):
+        if is_own_profile_question(routing_message):
             answer = _own_profile_answer(_session_profile(recent_before))
             _safe_put_message(
                 session_id=session_id,
@@ -2396,7 +2472,7 @@ async def chat(
         # KB-only enforcement: legacy cache entries do not carry retrieval
         # context or citations, so they are not trusted as answer sources.
 
-        if is_course_count_question(user_message):
+        if is_course_count_question(routing_message):
             # Prefer the live, crawled Siksha catalog for an accurate count; fall
             # back to the static courses.json snapshot only when it is absent.
             if COURSE_CATALOG:
@@ -2428,7 +2504,7 @@ async def chat(
             )
             return _response(answer, sources, 1, request_id, citations=citations)
 
-        if is_latest_course_question(user_message) and COURSE_CATALOG:
+        if is_latest_course_question(routing_message) and COURSE_CATALOG:
             newest = _latest_courses(limit=3)
             if newest:
                 top = newest[0]
@@ -2463,8 +2539,8 @@ async def chat(
                     citations=["courses_catalog.json | Siksha live catalog"],
                 )
 
-        if is_course_list_intent(user_message) or is_bare_list_followup(
-            user_message, recent_before
+        if is_course_list_intent(routing_message) or is_bare_list_followup(
+            routing_message, recent_before
         ):
             # Prefer the live Siksha catalog so the listed courses stay current.
             if COURSE_CATALOG:
@@ -2527,7 +2603,7 @@ async def chat(
         # reliable. Course questions carry none of these keywords, so they fall
         # through to RAG unchanged — this is a thin FAQ+RAG hybrid, not the old
         # brittle keyword-routing maze.
-        faq_answer = get_faq_answer(user_message)
+        faq_answer = get_faq_answer(routing_message)
         if faq_answer:
             # When a course is already under discussion, an FAQ-shaped follow-up
             # ("how do I enroll?") is really about THAT course. Try the
@@ -2572,7 +2648,7 @@ async def chat(
         # Course recommendation ("recommend a course for MBA"): match the subject
         # against the real catalog. Needs an explicit recommend/suggest verb and
         # no specific course named, so course-detail questions stay on RAG.
-        if _is_recommendation_request(user_message) or states_own_field_only(user_message):
+        if _is_recommendation_request(routing_message) or states_own_field_only(routing_message):
             return _recommend_courses_response(
                 user_message,
                 history_messages,
@@ -2593,6 +2669,7 @@ async def chat(
             session_id,
             request_id,
             recent_messages=recent_before,
+            routing_message=routing_message,
         )
 
     except HTTPException:
