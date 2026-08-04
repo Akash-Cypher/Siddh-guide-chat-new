@@ -95,21 +95,12 @@ document.addEventListener('DOMContentLoaded', () => {
     proactiveMessage.classList.remove('visible');
   }
 
-  function typewriterEffect(element, text) {
-    let i = 0;
-    element.textContent = '';
-    const speed = 8;
-
-    function type() {
-      if (i < text.length) {
-        element.textContent += text.charAt(i);
-        i += 1;
-        chatMessages.scrollTop = chatMessages.scrollHeight;
-        setTimeout(type, speed);
-      }
-    }
-
-    type();
+  // Answers are shown in full the moment they arrive. The old character-by-
+  // character animation added ~8ms per character, so a 600-character answer sat
+  // there revealing itself for ~5 seconds after it had already been received.
+  function showAnswer(element, text) {
+    element.textContent = text;
+    chatMessages.scrollTop = chatMessages.scrollHeight;
   }
 
   async function fetchBotResponse(userMessage) {
@@ -145,8 +136,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
       const data = await response.json();
       botMessageElement.classList.remove('typing');
-      botMessageElement.textContent = '';
-      typewriterEffect(botMessageElement, data.answer || '');
+      showAnswer(botMessageElement, data.answer || '');
     } catch (error) {
       console.error('Error fetching bot response:', error);
       botMessageElement.classList.remove('typing');

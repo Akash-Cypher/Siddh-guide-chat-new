@@ -6,6 +6,7 @@ chat store so history is genuinely written, ordered, read back and used.
 """
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -465,6 +466,175 @@ def test_falls_back_to_faq_and_writes_one_turn_when_unsupported(client, monkeypa
     history = main.get_recent_messages(session_id="fb", limit=50)
     roles = [m["role"] for m in history]
     assert roles == ["user", "assistant"] * 3, f"history not write-once: {roles}"
+
+
+# ------------------------------------- bare "list them" after a course answer
+
+@pytest.mark.parametrize("message", ["list them", "show them", "list all", "name them"])
+def test_bare_list_followup_after_a_course_turn(message):
+    history = [{"role": "assistant", "text": "There are 36 courses on Siksha."}]
+    assert main.is_bare_list_followup(message, history)
+
+
+@pytest.mark.parametrize("message", ["list them", "show them"])
+def test_bare_list_is_ignored_without_course_context(message):
+    assert not main.is_bare_list_followup(message, [])
+    assert not main.is_bare_list_followup(
+        message, [{"role": "assistant", "text": "Hello! How can I assist you today?"}]
+    )
+
+
+def test_list_them_returns_the_course_list(client, rec):
+    ask(client, "how many courses are there")
+    out = ask(client, "list them")
+
+    assert out["status"] == "ok"
+    assert out["sources"] == ["courses_catalog.json"]
+    assert "Indian Knowledge Systems for Engineers" in out["answer"]
+
+
+# ------------------------------- catalog attributes when retrieval finds nothing
+
+CATALOG_WITH_GAPS = [
+    {"title": "Indian Water Management", "categories": ["STEM"],
+     "price": "₹ 2,500.00", "duration": None, "audience": "UG",
+     "url": "https://siksha.siddhantaknowledge.org/water/"},
+    {"title": "Vedic Mathematics Foundations", "categories": ["mathematics"],
+     "price": "₹ 1,500.00", "duration": "30 Hours", "audience": "UG",
+     "url": "https://siksha.siddhantaknowledge.org/vedic/"},
+]
+
+
+def test_catalog_context_carries_the_real_values(monkeypatch):
+    """The row becomes ordinary grounded context - the model writes the words."""
+    monkeypatch.setattr(main, "COURSE_CATALOG", CATALOG_WITH_GAPS)
+
+    context, citations = main._catalog_context_for_course("Vedic Mathematics Foundations")
+
+    assert "30 Hours" in context
+    assert "1,500" in context
+    assert citations == ["courses_catalog.json | Vedic Mathematics Foundations"]
+
+
+def test_blank_field_is_marked_not_listed_not_invented(monkeypatch):
+    """14 of 32 real courses have duration: null. The context must say so, so the
+    model can state it truthfully instead of inventing a number."""
+    monkeypatch.setattr(main, "COURSE_CATALOG", CATALOG_WITH_GAPS)
+
+    context, _ = main._catalog_context_for_course("Indian Water Management")
+
+    assert "duration: not listed on the website" in context
+    # Nothing resembling a fabricated duration is present to copy from.
+    assert not re.search(r"duration:\s*\d+", context, re.I)
+    # What IS known still reaches the model.
+    assert "2,500" in context and "siksha.siddhantaknowledge.org/water/" in context
+
+
+def test_no_catalog_context_without_a_course_in_play(monkeypatch):
+    monkeypatch.setattr(main, "COURSE_CATALOG", CATALOG_WITH_GAPS)
+    assert main._catalog_context_for_course("") == ("", [])
+    assert main._catalog_context_for_course("Nonexistent Course") == ("", [])
+
+
+def test_duration_followup_reaches_the_model_with_catalog_context(client, monkeypatch, rec):
+    """End to end: retrieval misses, the catalog row is used, the model answers."""
+    monkeypatch.setattr(main, "COURSE_CATALOG", CATALOG_WITH_GAPS)
+    monkeypatch.setattr(main, "retrieve_hits", lambda *a, **k: [])
+
+    rec.answer = "Vedic Mathematics Foundations is listed as 30 Hours."
+    ask(client, "Tell me about Vedic Mathematics Foundations", session="dur")
+    out = ask(client, "What is its duration?", session="dur")
+
+    assert out["status"] == "ok"
+    assert "30 Hours" in rec.calls[-1]["context"], "catalog row must reach the model"
+    assert out["answer"] == rec.answer
+
+
+# --------------------------------------------------------------------------- #
+# Regressions taken verbatim from production refusals. Each of these reached a
+# live visitor as "I can help with Siddhanta course and website information..."
+# when it should have been answered.
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize(
+    "message", ["Hi sid", "Hii", "Hari om", "hello there", "Namaste", "good morning"]
+)
+def test_greetings_with_a_name_or_stretched_vowel(message):
+    assert main.is_greeting(message)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "hi, what is the fee for samskrit?",   # opens with hi but IS a question
+        "hey can you list the courses",
+        "good morning, how do I enroll",
+    ],
+)
+def test_greeting_does_not_swallow_real_questions(message):
+    assert not main.is_greeting(message)
+
+
+@pytest.mark.parametrize("message", ["can you pls list all?", "could you list them", "please show all"])
+def test_polite_list_phrasings(message):
+    history = [{"role": "assistant", "text": "There are 36 courses on Siksha."}]
+    assert main.is_bare_list_followup(message, history)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "i would like to take sanskrit",
+        "i want to learn ayurveda",
+        "i want to buy a course",
+        "looking for something in law",
+    ],
+)
+def test_stated_study_intent_is_a_recommendation(message):
+    assert main._is_recommendation_request(message)
+
+
+@pytest.mark.parametrize(
+    "message", ["I am an engineer", "My stream is commerce", "I am a teacher"]
+)
+def test_bare_self_description_leads_to_recommendations(message):
+    assert main.states_own_field_only(message)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "what is the fee for the samskrit course?",  # names a course - normal routing
+        "I am confused about the syllabus",          # not a field statement
+        "what is my stream?",                        # a question, not a statement
+    ],
+)
+def test_self_description_check_does_not_over_match(message):
+    assert not main.states_own_field_only(message)
+
+
+def test_bare_self_description_end_to_end(client, rec):
+    """'I am an engineer' alone must produce real course suggestions, not a refusal."""
+    rec.answer = "Indian Knowledge Systems for Engineers fits your background."
+
+    out = ask(client, "I am an engineer", session="bare")
+
+    assert out["status"] == "ok"
+    assert out["answer"] != main.REFUSAL_MESSAGE
+    assert "Indian Knowledge Systems for Engineers" in out["answer"]
+
+
+def test_off_topic_is_still_refused_without_calling_the_model(client, monkeypatch):
+    """The safety property must survive all of the above."""
+    def no_model(*a, **k):
+        raise AssertionError("the model must not be called for an off-topic refusal")
+
+    monkeypatch.setattr(main, "generate_answer", no_model)
+    monkeypatch.setattr(main, "retrieve_hits", lambda *a, **k: [])
+
+    out = ask(client, "what is the weather today", session="offtopic")
+    assert out["status"] == "refused"
+    assert out["answer"] == main.REFUSAL_MESSAGE
 
 
 def test_grounding_is_not_weakened_by_session_context(client, rec):

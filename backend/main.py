@@ -133,6 +133,18 @@ GREETINGS = {
     "good evening",
 }
 
+# Exact-set matching missed anything with the bot's name or a stretched vowel
+# attached — "Hi sid", "Hii", "Hari om" all fell through to retrieval and were
+# refused. Still anchored at both ends, so a real question that merely opens with
+# "hi" ("hi, what is the fee for X?") is not swallowed as a bare greeting.
+_GREETING_RE = re.compile(
+    r"^(?:hi+|hey+|he?llo+|helo+|namaste|namaskar|hari\s*om|greetings|"
+    r"good\s+(?:morning|afternoon|evening|day))"
+    r"(?:[\s,!.-]+(?:sid|ask\s*sid|there|team|bot|all|everyone))?"
+    r"[\s!.?]*$",
+    re.I,
+)
+
 ABOUT_BOT_KEYWORDS = [
     "who are you",
     "what are you",
@@ -555,7 +567,8 @@ def is_course_recommendation_intent(message: str) -> bool:
 
 
 def is_greeting(message: str) -> bool:
-    return _norm(message).lower() in GREETINGS
+    msg = _norm(message)
+    return msg.lower() in GREETINGS or bool(_GREETING_RE.match(msg))
 
 
 def is_about_bot(message: str) -> bool:
@@ -1623,7 +1636,14 @@ _RECOMMEND_VERB_RE = re.compile(
     # "course related to robotics". These should match against the catalog, not
     # fall through to a refusal. (A named course is still excluded below.)
     r"|\bcourses?\s+(?:on|about|related to|relevant to|regarding|for|in|of)\b"
-    r"|\bany\s+courses?\b",
+    r"|\bany\s+courses?\b"
+    # ... OR a plainly stated intent to study something: "i would like to take
+    # sanskrit", "i want to learn ayurveda", "looking for something in law".
+    # These carry a subject but no recommend/suggest verb, so they used to fall
+    # through to retrieval and get refused.
+    r"|\bi\s*(?:'d|\s+would)?\s*(?:like|want|wish|wanna|need)\s*(?:to)?\s*"
+    r"(?:take|do|join|learn|study|buy|enrol|enroll|pursue|start)\b"
+    r"|\b(?:i\s*(?:am|'m)\s+)?looking\s+for\b",
     re.I,
 )
 
@@ -1806,6 +1826,30 @@ _MENTIONS_COURSE_RE = re.compile(
 )
 
 
+# "list them" / "show them" right after a course answer. These carry no noun of
+# their own, so the normal course-list matcher (which needs the word "courses")
+# misses them and they dead-end in a refusal.
+_BARE_LIST_RE = re.compile(
+    r"^\s*(?:can|could|would|will)?\s*(?:you\s+)?(?:pls|plz|please|kindly)?\s*"
+    r"(?:list|show|name|give|display)\s*"
+    r"(?:me\s+)?(?:them|it|those|these|all|out)?\s*[.?!]*\s*$",
+    re.I,
+)
+
+
+def is_bare_list_followup(message: str, recent_messages: Optional[list[dict]]) -> bool:
+    """True when a bare 'list them' follows a turn that was about courses."""
+    if not _BARE_LIST_RE.match(_norm(message)):
+        return False
+    for m in reversed(recent_messages or []):
+        text = (m.get("text") or "").lower()
+        if not text:
+            continue
+        if "course" in text or "siksha" in text:
+            return True
+    return False
+
+
 def is_own_profile_question(message: str) -> bool:
     msg = _norm(message)
     if not _ASK_OWN_PROFILE_RE.search(msg):
@@ -1868,6 +1912,25 @@ def _is_recommendation_request(message: str) -> bool:
     if COURSE_DATA and find_course_title_in_message(message, COURSE_DATA):
         return False
     return True
+
+
+def states_own_field_only(message: str) -> bool:
+    """True for a bare self-description like "I am an engineer".
+
+    On its own this is not a question, so it used to reach retrieval and get
+    refused — a dead end right after the visitor told us the most useful thing
+    about themselves. Treated as a recommendation request instead, so the reply
+    is generated from the real catalog for that field.
+    """
+    msg = _norm(message)
+    if not msg or "?" in msg or len(msg.split()) > 12:
+        return False
+    # Anything naming a course/programme is a real query; leave it to the normal routes.
+    if _MENTIONS_COURSE_RE.search(msg):
+        return False
+
+    profile = _session_profile([{"role": "user", "text": msg}])
+    return bool(profile.get("field") or profile.get("interests"))
 
 
 def _recommendation_subject_terms(message: str) -> list[str]:
@@ -2038,6 +2101,39 @@ def _retrieval_query(user_message: str, recent_messages: Optional[list[dict]] = 
     return " ".join(tail) + ". " + user_message
 
 
+def _catalog_context_for_course(course_title: str) -> tuple[str, list[str]]:
+    """Grounded context built from the live catalog row for one course.
+
+    Used when vector retrieval finds nothing for a follow-up like "what is its
+    duration?". The row is handed to the model as ordinary context so the reply
+    is written dynamically, exactly like every other answer — no canned
+    sentences. Blank fields are stated as not listed, so the model can say so
+    truthfully instead of inventing a value.
+    """
+    title = (course_title or "").strip()
+    if not title or not COURSE_CATALOG:
+        return "", []
+
+    entry = next(
+        (c for c in COURSE_CATALOG if (c.get("title") or "").strip().lower() == title.lower()),
+        None,
+    )
+    if not entry:
+        return "", []
+
+    real_title = (entry.get("title") or title).strip()
+    lines = [f"Course title: {real_title}"]
+    for field in ("duration", "price", "audience", "categories", "url", "published"):
+        value = entry.get(field)
+        if isinstance(value, list):
+            value = ", ".join(str(v) for v in value)
+        value = str(value).strip() if value else ""
+        lines.append(f"{field}: {value if value else 'not listed on the website'}")
+
+    context = f"[source=courses_catalog.json | {real_title}]\n" + "\n".join(lines)
+    return context, [f"courses_catalog.json | {real_title}"]
+
+
 def _course_aware_answer(
     user_message: str,
     history_messages: list[dict],
@@ -2097,25 +2193,38 @@ def _rag_answer_response(
         max_chunk_chars=RAG_MAX_CHUNK_CHARS,
     )
 
-    if not context or not citations:
-        return _refusal_response(session_id, request_id)
-
     # Temporary details the user stated this session, so "why did you pick that
     # course?" can be answered in terms of their background without those
     # details ever becoming a source of course facts.
     profile = _session_profile(recent_messages)
 
-    answer, supported = _generated_answer_or_refusal(
-        user_message=user_message,
-        context=context,
-        citations=citations,
-        history_messages=history_messages,
-        session_context=_session_context_block(profile),
-        extra_allowed_tokens=_profile_allowed_tokens(profile),
-    )
+    def _answer_from(ctx: str, cits: list[str]) -> tuple[str, bool]:
+        return _generated_answer_or_refusal(
+            user_message=user_message,
+            context=ctx,
+            citations=cits,
+            history_messages=history_messages,
+            session_context=_session_context_block(profile),
+            extra_allowed_tokens=_profile_allowed_tokens(profile),
+        )
+
+    answer, supported = ("", False)
+    if context and citations:
+        answer, supported = _answer_from(context, citations)
 
     if not supported:
-        return _refusal_response(session_id, request_id)
+        # Retrieval found nothing usable, but a course is under discussion — give
+        # the model that course's catalog row and let it answer from there. Blank
+        # fields are marked "not listed on the website" in the context, so it can
+        # say so truthfully rather than invent a value.
+        cat_ctx, cat_cits = _catalog_context_for_course(profile.get("preferred_course", ""))
+        if not cat_ctx:
+            return _refusal_response(session_id, request_id)
+
+        answer, supported = _answer_from(cat_ctx, cat_cits)
+        if not supported:
+            return _refusal_response(session_id, request_id)
+        citations = cat_cits
 
     sources = ["rag", "nova"]
     _store_assistant_message(
@@ -2354,7 +2463,9 @@ async def chat(
                     citations=["courses_catalog.json | Siksha live catalog"],
                 )
 
-        if is_course_list_intent(user_message):
+        if is_course_list_intent(user_message) or is_bare_list_followup(
+            user_message, recent_before
+        ):
             # Prefer the live Siksha catalog so the listed courses stay current.
             if COURSE_CATALOG:
                 titles = [
@@ -2461,7 +2572,7 @@ async def chat(
         # Course recommendation ("recommend a course for MBA"): match the subject
         # against the real catalog. Needs an explicit recommend/suggest verb and
         # no specific course named, so course-detail questions stay on RAG.
-        if _is_recommendation_request(user_message):
+        if _is_recommendation_request(user_message) or states_own_field_only(user_message):
             return _recommend_courses_response(
                 user_message,
                 history_messages,
