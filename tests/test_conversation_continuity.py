@@ -640,6 +640,62 @@ def test_off_topic_is_still_refused_without_calling_the_model(client, monkeypatc
     assert out["answer"] == main.REFUSAL_MESSAGE
 
 
+# ------------------------------------------- subject words from the catalog
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "any music based courses",
+        "do we have samskrit courses",
+        "any music courses",
+        "courses about commerce",
+        "do you have anything on mathematics",
+    ],
+)
+def test_a_single_catalog_word_identifies_a_course_query(monkeypatch, message):
+    """No recommend/suggest verb needed - one distinctive subject word is enough."""
+    monkeypatch.setattr(main, "COURSE_CATALOG", CATALOG)
+    assert main.mentions_catalog_subject(message)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "what is the weather today",
+        "how many courses are there",
+        "how do I enroll",
+        "write me a poem",
+        "who are you",
+        "what is my stream?",
+    ],
+)
+def test_subject_matching_does_not_over_capture(monkeypatch, message):
+    monkeypatch.setattr(main, "COURSE_CATALOG", CATALOG)
+    assert not main.mentions_catalog_subject(message)
+
+
+def test_subject_terms_come_from_the_live_catalog(monkeypatch):
+    """Terms are derived, not hardcoded - a new course is picked up automatically."""
+    monkeypatch.setattr(main, "COURSE_CATALOG", CATALOG)
+    before = main._distinctive_catalog_terms()
+    assert "architecture" not in before
+
+    monkeypatch.setattr(main, "COURSE_CATALOG", CATALOG + [
+        {"title": "Indian Temple Architecture", "categories": ["Arts"]},
+    ])
+    assert "architecture" in main._distinctive_catalog_terms()
+    assert main.mentions_catalog_subject("any architecture courses")
+
+
+def test_words_common_to_most_titles_are_not_subjects(monkeypatch):
+    """'indian' appears in nearly every title, so it identifies nothing."""
+    monkeypatch.setattr(main, "COURSE_CATALOG", [
+        {"title": f"Indian Knowledge Systems {n}", "categories": []} for n in range(6)
+    ])
+    terms = main._distinctive_catalog_terms()
+    assert "indian" not in terms and "knowledge" not in terms
+
+
 # ------------------------------------------------------- typo tolerance
 
 @pytest.mark.parametrize(

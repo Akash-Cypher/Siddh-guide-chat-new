@@ -279,9 +279,22 @@
       }
     }
 
+    // Greet on first open so the window never starts empty. Once per page only.
+    let welcomeShown = false;
+    function showWelcome() {
+      if (welcomeShown) return;
+      welcomeShown = true;
+      addMessage(
+        'Hi! I’m Ask Sid. I can help you explore Siddhanta’s IKS courses, '
+        + 'suggest ones that fit your background, and point you to enrollment details. '
+        + 'What would you like to know?',
+        'bot'
+      );
+    }
+
     chatToggleButton.addEventListener('click', () => {
       const isVisible = chatWindow.classList.toggle('visible');
-      if (isVisible) { stopProactiveMessaging(); userInput.focus(); }
+      if (isVisible) { stopProactiveMessaging(); showWelcome(); userInput.focus(); }
       else { startProactiveMessaging(); }
     });
 

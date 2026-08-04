@@ -1979,6 +1979,64 @@ def _is_recommendation_request(message: str) -> bool:
     return True
 
 
+# Words that appear across most course titles carry no signal ("indian",
+# "knowledge", "system"). A subject word is only useful if it distinguishes a
+# few courses from the rest, so terms are scored by how rare they are in the
+# live catalog rather than listed by hand.
+_CATALOG_TERM_STOPWORDS = {
+    "course", "courses", "programme", "program", "case", "point", "with", "from",
+    "into", "through", "using", "based", "study", "studies", "introduction",
+    "advanced", "basic", "part", "level", "module", "overview",
+}
+
+
+_AVAILABILITY_RE = re.compile(
+    r"\b(?:do (?:you|we) have|is there|are there|do you offer|"
+    r"any(?:thing)?\s+(?:on|about|for|related)|looking for)\b",
+    re.I,
+)
+
+
+def _distinctive_catalog_terms() -> set:
+    """Subject words that identify a small subset of the catalog."""
+    if not COURSE_CATALOG:
+        return set()
+
+    counts: dict[str, int] = {}
+    for entry in COURSE_CATALOG:
+        cats = entry.get("categories") or []
+        text = (entry.get("title") or "") + " " + (
+            " ".join(str(c) for c in cats) if isinstance(cats, list) else str(cats)
+        )
+        for word in set(re.findall(r"[a-z]{4,}", text.lower())):
+            counts[word] = counts.get(word, 0) + 1
+
+    limit = max(1, int(len(COURSE_CATALOG) * 0.3))
+    return {
+        word for word, n in counts.items()
+        if n <= limit and word not in _CATALOG_TERM_STOPWORDS
+    }
+
+
+def mentions_catalog_subject(message: str) -> bool:
+    """True when the message names a course word AND a real catalog subject.
+
+    "any architecture based courses" carries no recommend/suggest verb, so the
+    verb-based matcher missed it and the question dead-ended. Matching a single
+    distinctive word from a live course title — architecture, samskrit, ayurveda,
+    music — is enough to know this is a course query. Terms come from the catalog
+    itself, so new courses are picked up with no code change.
+    """
+    msg = _norm(message).lower()
+    # Either the message says "course/programme", or it asks whether something
+    # exists ("do you have anything on agriculture") — both are course queries.
+    if not (_MENTIONS_COURSE_RE.search(msg) or _AVAILABILITY_RE.search(msg)):
+        return False
+
+    terms = _distinctive_catalog_terms()
+    return any(word in terms for word in re.findall(r"[a-z]{4,}", msg))
+
+
 def states_own_field_only(message: str) -> bool:
     """True for a bare self-description like "I am an engineer".
 
@@ -2648,7 +2706,11 @@ async def chat(
         # Course recommendation ("recommend a course for MBA"): match the subject
         # against the real catalog. Needs an explicit recommend/suggest verb and
         # no specific course named, so course-detail questions stay on RAG.
-        if _is_recommendation_request(routing_message) or states_own_field_only(routing_message):
+        if (
+            _is_recommendation_request(routing_message)
+            or states_own_field_only(routing_message)
+            or mentions_catalog_subject(routing_message)
+        ):
             return _recommend_courses_response(
                 user_message,
                 history_messages,

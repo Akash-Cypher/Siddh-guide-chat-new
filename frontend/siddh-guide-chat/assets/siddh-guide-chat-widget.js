@@ -148,11 +148,28 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
+  // Greet the visitor the moment the window is first opened, so it never starts
+  // as an empty box. Shown once per page: reopening the bubble continues the
+  // same conversation, so a second greeting would misrepresent that.
+  let welcomeShown = false;
+
+  function showWelcome() {
+    if (welcomeShown) return;
+    welcomeShown = true;
+    addMessage(
+      'Hi! I’m Ask Sid. I can help you explore Siddhanta’s IKS courses, '
+      + 'suggest ones that fit your background, and point you to enrollment details. '
+      + 'What would you like to know?',
+      'bot'
+    );
+  }
+
   chatToggleButton.addEventListener('click', () => {
     const isVisible = chatWindow.classList.toggle('visible');
 
     if (isVisible) {
       stopProactiveMessaging();
+      showWelcome();
       userInput.focus();
     } else {
       // Closing the bubble does NOT end the conversation: SESSION_ID is bound to
