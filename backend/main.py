@@ -2257,6 +2257,17 @@ def _catalog_context_for_course(course_title: str) -> tuple[str, list[str]]:
     return context, [f"courses_catalog.json | {real_title}"]
 
 
+def _names_catalog_course(answer: str) -> bool:
+    """True when the answer mentions a course that actually exists."""
+    text = (answer or "").lower()
+    if not text.strip():
+        return False
+    return any(
+        (c.get("title") or "").strip() and (c.get("title") or "").strip().lower() in text
+        for c in COURSE_CATALOG or []
+    )
+
+
 def _catalog_overview_context(max_chars: int = 6000) -> tuple[str, list[str]]:
     """The whole live course catalog as grounded context.
 
@@ -2397,16 +2408,37 @@ def _rag_answer_response(
     if not supported:
         # Nothing matched by search. Rather than refuse outright — which is what
         # a misspelling or an unusual phrasing produces — give the model the real
-        # catalog and let it work out the intent. Genuinely off-topic questions
-        # still refuse here: the catalog cannot support an answer about them, and
-        # _answer_supported_by_context rejects anything it does not ground.
+        # catalog and let it work out the intent.
         all_ctx, all_cits = _catalog_overview_context()
         if not all_ctx:
             return _refusal_response(session_id, request_id)
 
-        answer, supported = _answer_from(all_ctx, all_cits)
-        if not supported:
+        try:
+            answer = generate_answer(
+                user_message=(
+                    f"Visitor asked: {user_message}\n"
+                    "Answer using only the course list in the context. If a course "
+                    "matches, describe it. If nothing matches, say so plainly and "
+                    "point them to the closest courses that ARE listed. Never name a "
+                    "course that is not in the list."
+                ),
+                context=all_ctx,
+                history_messages=history_messages,
+                session_context=_session_context_block(profile),
+            )
+        except Exception:
+            logger.exception("[%s] catalog fallback generation failed", request_id)
             return _refusal_response(session_id, request_id)
+
+        answer = _strip_embedded_refusal(answer)
+        # Accept it when it names a course that genuinely exists. "We don't have a
+        # Vedic Mathematics course, but Ayush covers wellness" is a good answer —
+        # the usual validator rejects it purely for sounding negative, which is
+        # what left visitors staring at the generic refusal.
+        if not _names_catalog_course(answer):
+            return _refusal_response(session_id, request_id)
+
+        supported = True
         citations = all_cits
 
     sources = ["rag", "nova"]

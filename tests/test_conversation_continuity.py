@@ -660,6 +660,38 @@ def test_unmatched_question_reaches_the_model_with_the_catalog(client, monkeypat
     assert "Samskrit 1: Thinking in Samskrit" in context, "the WHOLE catalog, not one course"
 
 
+def test_says_it_has_no_such_course_instead_of_refusing(client, monkeypatch, rec):
+    """'We don't have X, but we do have Y' must survive — it is a good answer.
+
+    Reproduces the live 'vedik mathmatics' case: no such course exists, and the
+    honest reply sounds negative, which the ordinary validator used to reject.
+    """
+    monkeypatch.setattr(main, "COURSE_CATALOG", CATALOG)
+    monkeypatch.setattr(main, "retrieve_hits", lambda *a, **k: [])
+
+    rec.answer = (
+        "We don't have a Vedic Mathematics course. The closest listed is "
+        "Indian Knowledge Systems for Engineers."
+    )
+    out = ask(client, "vedik mathmatics", session="nomatch")
+
+    assert out["status"] == "ok"
+    assert out["answer"] == rec.answer
+    assert out["answer"] != main.REFUSAL_MESSAGE
+
+
+def test_reply_naming_no_real_course_is_still_refused(client, monkeypatch, rec):
+    """A made-up course name must never get through."""
+    monkeypatch.setattr(main, "COURSE_CATALOG", CATALOG)
+    monkeypatch.setattr(main, "retrieve_hits", lambda *a, **k: [])
+
+    rec.answer = "Yes, we offer Advanced Quantum Ayurveda starting next month."
+    out = ask(client, "quantum ayurveda course", session="fake")
+
+    assert out["status"] == "refused"
+    assert out["answer"] == main.REFUSAL_MESSAGE
+
+
 def test_catalog_overview_marks_blank_fields(monkeypatch):
     monkeypatch.setattr(main, "COURSE_CATALOG", [
         {"title": "Indian Water Management", "categories": ["STEM"],
