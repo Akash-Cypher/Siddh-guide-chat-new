@@ -2257,6 +2257,52 @@ def _catalog_context_for_course(course_title: str) -> tuple[str, list[str]]:
     return context, [f"courses_catalog.json | {real_title}"]
 
 
+def _catalog_overview_context(max_chars: int = 6000) -> tuple[str, list[str]]:
+    """The whole live course catalog as grounded context.
+
+    Last resort before refusing. Vector search plus its literal keyword gate is
+    unforgiving of misspellings and unusual phrasing, so a perfectly reasonable
+    question ("any architecture based courses", "courses on humainites") can find
+    nothing and dead-end. Handing the model the real catalog lets it read the
+    intent itself and answer from actual data — or say plainly that nothing
+    matches. It cannot invent a course, because the catalog is all it is given
+    and every answer is still validated against this text.
+    """
+    if not COURSE_CATALOG:
+        return "", []
+
+    lines: list[str] = []
+    used = 0
+    for entry in COURSE_CATALOG:
+        title = (entry.get("title") or "").strip()
+        if not title:
+            continue
+        cats = entry.get("categories") or []
+        cat_text = ", ".join(str(c) for c in cats) if isinstance(cats, list) else str(cats)
+        line = (
+            f"- {title}"
+            f" | categories: {cat_text or 'not listed'}"
+            f" | price: {entry.get('price') or 'not listed'}"
+            f" | duration: {entry.get('duration') or 'not listed'}"
+            f" | audience: {entry.get('audience') or 'not listed'}"
+        )
+        if entry.get("url"):
+            line += f" | page: {entry['url']}"
+        if used + len(line) > max_chars:
+            break
+        lines.append(line)
+        used += len(line)
+
+    if not lines:
+        return "", []
+
+    context = (
+        "[source=courses_catalog.json | Siksha course catalog]\n"
+        "Every course currently listed on Siksha:\n" + "\n".join(lines)
+    )
+    return context, ["courses_catalog.json | Siksha live catalog"]
+
+
 def _course_aware_answer(
     user_message: str,
     history_messages: list[dict],
@@ -2343,13 +2389,25 @@ def _rag_answer_response(
         # fields are marked "not listed on the website" in the context, so it can
         # say so truthfully rather than invent a value.
         cat_ctx, cat_cits = _catalog_context_for_course(profile.get("preferred_course", ""))
-        if not cat_ctx:
+        if cat_ctx:
+            answer, supported = _answer_from(cat_ctx, cat_cits)
+            if supported:
+                citations = cat_cits
+
+    if not supported:
+        # Nothing matched by search. Rather than refuse outright — which is what
+        # a misspelling or an unusual phrasing produces — give the model the real
+        # catalog and let it work out the intent. Genuinely off-topic questions
+        # still refuse here: the catalog cannot support an answer about them, and
+        # _answer_supported_by_context rejects anything it does not ground.
+        all_ctx, all_cits = _catalog_overview_context()
+        if not all_ctx:
             return _refusal_response(session_id, request_id)
 
-        answer, supported = _answer_from(cat_ctx, cat_cits)
+        answer, supported = _answer_from(all_ctx, all_cits)
         if not supported:
             return _refusal_response(session_id, request_id)
-        citations = cat_cits
+        citations = all_cits
 
     sources = ["rag", "nova"]
     _store_assistant_message(

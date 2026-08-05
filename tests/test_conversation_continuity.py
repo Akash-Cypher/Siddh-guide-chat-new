@@ -627,17 +627,73 @@ def test_bare_self_description_end_to_end(client, rec):
     assert "Indian Knowledge Systems for Engineers" in out["answer"]
 
 
-def test_off_topic_is_still_refused_without_calling_the_model(client, monkeypatch):
-    """The safety property must survive all of the above."""
-    def no_model(*a, **k):
-        raise AssertionError("the model must not be called for an off-topic refusal")
+def test_off_topic_is_still_refused(client, monkeypatch, rec):
+    """Off-topic must refuse — that is the guarantee that matters.
 
-    monkeypatch.setattr(main, "generate_answer", no_model)
+    It is enforced by grounding validation, not by declining to call the model:
+    since the catalog fallback exists, the model may be asked, but an answer the
+    catalog cannot support is rejected. `test_no_catalog_means_the_model_is_never_called`
+    covers the case where nothing can ground an answer at all.
+    """
+    monkeypatch.setattr(main, "COURSE_CATALOG", CATALOG)
     monkeypatch.setattr(main, "retrieve_hits", lambda *a, **k: [])
+    rec.answer = "Today it is sunny with a high of 34 degrees."
 
     out = ask(client, "what is the weather today", session="offtopic")
     assert out["status"] == "refused"
     assert out["answer"] == main.REFUSAL_MESSAGE
+
+
+# --------------------------------- the model gets a chance before any refusal
+
+def test_unmatched_question_reaches_the_model_with_the_catalog(client, monkeypatch, rec):
+    """A misspelling or odd phrasing must not dead-end before the model sees it."""
+    monkeypatch.setattr(main, "COURSE_CATALOG", CATALOG)
+    monkeypatch.setattr(main, "retrieve_hits", lambda *a, **k: [])  # search finds nothing
+
+    rec.answer = "Vedic Mathematics Foundations covers mathematics."
+    out = ask(client, "enything abt vedik mathmatics", session="fuzzy")
+
+    assert out["status"] == "ok", "should not refuse before trying the catalog"
+    context = rec.calls[-1]["context"]
+    assert "Vedic Mathematics Foundations" in context, "real catalog must reach the model"
+    assert "Samskrit 1: Thinking in Samskrit" in context, "the WHOLE catalog, not one course"
+
+
+def test_catalog_overview_marks_blank_fields(monkeypatch):
+    monkeypatch.setattr(main, "COURSE_CATALOG", [
+        {"title": "Indian Water Management", "categories": ["STEM"],
+         "price": None, "duration": None, "audience": "UG"},
+    ])
+    context, citations = main._catalog_overview_context()
+    assert "price: not listed" in context and "duration: not listed" in context
+    assert citations == ["courses_catalog.json | Siksha live catalog"]
+
+
+def test_off_topic_still_refuses_even_with_the_catalog_fallback(client, monkeypatch, rec):
+    """Safety: the catalog cannot ground a weather answer, so it is rejected."""
+    monkeypatch.setattr(main, "COURSE_CATALOG", CATALOG)
+    monkeypatch.setattr(main, "retrieve_hits", lambda *a, **k: [])
+
+    # Model tries to answer off-topic; grounding validation must reject it.
+    rec.answer = "It is sunny in Chennai today with a high of 34 degrees."
+    out = ask(client, "what is the weather today", session="weather")
+
+    assert out["status"] == "refused"
+    assert out["answer"] == main.REFUSAL_MESSAGE
+
+
+def test_no_catalog_means_the_model_is_never_called(client, monkeypatch):
+    """With no catalog there is nothing to ground a fallback, so it refuses early."""
+    monkeypatch.setattr(main, "COURSE_CATALOG", [])
+    monkeypatch.setattr(main, "retrieve_hits", lambda *a, **k: [])
+
+    def no_model(*a, **k):
+        raise AssertionError("model must not be called when nothing can ground it")
+
+    monkeypatch.setattr(main, "generate_answer", no_model)
+    out = ask(client, "something completely unrelated", session="nocat")
+    assert out["status"] == "refused"
 
 
 # ------------------------------------------- subject words from the catalog
