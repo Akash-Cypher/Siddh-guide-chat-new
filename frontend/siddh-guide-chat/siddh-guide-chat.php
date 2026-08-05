@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Ask Sid
  * Description: Ask Sid chatbot widget with secure WordPress proxy.
- * Version: 1.1.0
+ * Version: 1.2.0
  */
 
 if (!defined('ABSPATH')) {
@@ -51,6 +51,91 @@ function siddh_guide_chat_is_configured() {
 }
 
 /**
+ * ---------------------------------------------------------------------------
+ * Abuse throttling.
+ *
+ * The chat route has to be public — visitors are not logged in — so anything
+ * that can reach the site can call it. Every call costs a Bedrock invocation and
+ * a DynamoDB write, so without a limit a trivial script can run up a bill and
+ * flood the conversation store.
+ *
+ * Limits are deliberately well above real use (a visitor asks maybe 10-20
+ * questions in a sitting) so genuine users never notice them. Override in
+ * wp-config.php if needed.
+ * ---------------------------------------------------------------------------
+ */
+if (!defined('SIDDH_CHAT_RATE_PER_MIN')) {
+  define('SIDDH_CHAT_RATE_PER_MIN', 15);
+}
+if (!defined('SIDDH_CHAT_RATE_PER_HOUR')) {
+  define('SIDDH_CHAT_RATE_PER_HOUR', 120);
+}
+
+/** Caller IP, accounting for Cloudflare and standard proxies. */
+function siddh_guide_chat_client_ip() {
+  $candidates = [
+    'HTTP_CF_CONNECTING_IP',   // Cloudflare
+    'HTTP_TRUE_CLIENT_IP',
+    'HTTP_X_FORWARDED_FOR',
+    'REMOTE_ADDR',
+  ];
+
+  foreach ($candidates as $header) {
+    if (empty($_SERVER[$header])) {
+      continue;
+    }
+    // X-Forwarded-For may be a list; the first entry is the original client.
+    $value = explode(',', (string) $_SERVER[$header])[0];
+    $value = trim($value);
+    if (filter_var($value, FILTER_VALIDATE_IP)) {
+      return $value;
+    }
+  }
+
+  return '0.0.0.0';
+}
+
+/**
+ * Fixed-window counter. Returns true when this caller is over the limit.
+ * The window start is stored alongside the count so a steady trickle of
+ * requests cannot keep extending the window and lock a real visitor out.
+ */
+function siddh_guide_chat_over_limit($bucket, $limit, $window_seconds) {
+  $key = 'siddh_rl_' . $bucket . '_' . md5(siddh_guide_chat_client_ip());
+  $now = time();
+  $data = get_transient($key);
+
+  if (!is_array($data) || !isset($data['count'], $data['start'])
+      || ($now - (int) $data['start']) >= $window_seconds) {
+    $data = ['count' => 0, 'start' => $now];
+  }
+
+  if ((int) $data['count'] >= $limit) {
+    return true;
+  }
+
+  $data['count'] = (int) $data['count'] + 1;
+  set_transient($key, $data, $window_seconds);
+
+  return false;
+}
+
+/** null when allowed, or a ready-to-return 429 response. */
+function siddh_guide_chat_rate_limit_response() {
+  $over_minute = siddh_guide_chat_over_limit('m', SIDDH_CHAT_RATE_PER_MIN, 60);
+  $over_hour   = siddh_guide_chat_over_limit('h', SIDDH_CHAT_RATE_PER_HOUR, 3600);
+
+  if (!$over_minute && !$over_hour) {
+    return null;
+  }
+
+  return new WP_REST_Response(
+    ['detail' => 'You are sending messages very quickly. Please wait a moment and try again.'],
+    429
+  );
+}
+
+/**
  * REST proxy routes
  */
 add_action('rest_api_init', function () {
@@ -68,6 +153,12 @@ add_action('rest_api_init', function () {
 });
 
 function siddh_guide_chat_proxy(WP_REST_Request $request) {
+  // Checked before anything is forwarded, so a flood costs nothing on AWS.
+  $limited = siddh_guide_chat_rate_limit_response();
+  if ($limited !== null) {
+    return $limited;
+  }
+
   $payload = $request->get_json_params();
   if (!is_array($payload)) {
     $payload = [];
@@ -113,6 +204,11 @@ function siddh_guide_chat_proxy(WP_REST_Request $request) {
 }
 
 function siddh_guide_chat_history_proxy(WP_REST_Request $request) {
+  $limited = siddh_guide_chat_rate_limit_response();
+  if ($limited !== null) {
+    return $limited;
+  }
+
   $session_id = trim((string) $request->get_param('session_id'));
 
   if ($session_id === '') {

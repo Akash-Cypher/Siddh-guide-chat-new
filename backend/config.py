@@ -73,8 +73,12 @@ NOVA_MODEL_ID = os.getenv("NOVA_MODEL_ID", "").strip()
 # For Chroma cosine distance: lower is better. Tune after testing your data.
 RAG_MAX_DISTANCE = float(os.getenv("RAG_MAX_DISTANCE", "0.45"))
 RAG_DEFAULT_K = _get_int("RAG_DEFAULT_K", 3)
-RAG_MAX_CONTEXT_CHARS = _get_int("RAG_MAX_CONTEXT_CHARS", 1500)
-RAG_MAX_CHUNK_CHARS = _get_int("RAG_MAX_CHUNK_CHARS", 500)
+# A 500-char cap meant that even when the right article was retrieved, the model
+# saw only its first few sentences and could do little but link to the page.
+# Blog and course pages need room for an actual answer. Still small enough to
+# keep latency and token cost low; override per-environment if needed.
+RAG_MAX_CONTEXT_CHARS = _get_int("RAG_MAX_CONTEXT_CHARS", 3500)
+RAG_MAX_CHUNK_CHARS = _get_int("RAG_MAX_CHUNK_CHARS", 1400)
 
 # --------------------------------------------------------------------------- #
 # Live crawler / auto-refresh.

@@ -172,6 +172,43 @@ def test_release_zip_matches_the_sources():
             )
 
 
+def test_public_chat_route_is_rate_limited():
+    """The chat route must be public, so it needs its own abuse limit.
+
+    Every call costs a Bedrock invocation and a DynamoDB write; without a limit a
+    trivial script can run up a bill and flood the conversation store.
+    """
+    php = PLUGIN_PHP.read_text(encoding="utf-8")
+
+    assert "siddh_guide_chat_rate_limit_response" in php
+    assert "SIDDH_CHAT_RATE_PER_MIN" in php and "SIDDH_CHAT_RATE_PER_HOUR" in php
+    assert "429" in php, "throttled callers must get HTTP 429"
+
+    # Both public proxies must check before forwarding anything to AWS.
+    for fn in ("siddh_guide_chat_proxy", "siddh_guide_chat_history_proxy"):
+        body = php.split(f"function {fn}(")[1].split("\n}")[0]
+        assert "siddh_guide_chat_rate_limit_response" in body, f"{fn} is unthrottled"
+        assert body.index("rate_limit_response") < body.index("wp_remote_"), (
+            f"{fn} must check the limit BEFORE calling the backend"
+        )
+
+
+def test_rate_limit_survives_a_slow_trickle():
+    """The window start is tracked, so steady use cannot extend the window
+    forever and lock out a real visitor."""
+    php = PLUGIN_PHP.read_text(encoding="utf-8")
+    body = php.split("function siddh_guide_chat_over_limit(")[1].split("\n}")[0]
+    assert "'start'" in body and "window_seconds" in body
+
+
+def test_client_ip_handles_cloudflare():
+    """The site sits behind Cloudflare, so REMOTE_ADDR alone would be Cloudflare
+    itself — every visitor would share one bucket."""
+    php = PLUGIN_PHP.read_text(encoding="utf-8")
+    assert "HTTP_CF_CONNECTING_IP" in php
+    assert "FILTER_VALIDATE_IP" in php, "a spoofed header must not become the key"
+
+
 def test_asset_version_is_file_derived_not_hardcoded():
     php = PLUGIN_PHP.read_text(encoding="utf-8")
 

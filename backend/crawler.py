@@ -370,9 +370,15 @@ def crawl_courses() -> tuple[list[dict], list[dict]]:
 # --------------------------------------------------------------------------- #
 
 def crawl_blogs() -> list[dict]:
+    # Ask for the full article body, not just the excerpt. WordPress excerpts are
+    # a one-line teaser ending in "[...]", which gave the bot nothing to answer
+    # from — it could only point at the link. `content` is the real post text.
     posts = fetch_json(
         f"{MAIN_SITE}/wp-json/wp/v2/posts",
-        params={"per_page": MAX_BLOG_POSTS, "_fields": "title,excerpt,link,date"},
+        params={
+            "per_page": MAX_BLOG_POSTS,
+            "_fields": "title,excerpt,content,link,date",
+        },
     )
     if not posts:
         return []
@@ -383,7 +389,10 @@ def crawl_blogs() -> list[dict]:
 
     for post in posts:
         title = _clean_text((post.get("title") or {}).get("rendered", ""))
-        excerpt = extract_page_text((post.get("excerpt") or {}).get("rendered", ""), max_chars=600)
+        # Prefer the full body; fall back to the excerpt only if a post has none.
+        body = extract_page_text((post.get("content") or {}).get("rendered", ""))
+        if not body:
+            body = extract_page_text((post.get("excerpt") or {}).get("rendered", ""), max_chars=600)
         link = (post.get("link") or "").strip()
         posted = (post.get("date") or "")[:10]
         if not title:
@@ -396,7 +405,7 @@ def crawl_blogs() -> list[dict]:
                 "source_url": link,
                 "category": "blog",
                 "keywords": _keywords_from(title, ["blog", "article"]),
-                "content": f"Blog post: {title}. Published {posted}. {excerpt}".strip(),
+                "content": f"Blog post: {title}. Published {posted}. {body}".strip(),
                 "last_verified": today,
             }
         )
