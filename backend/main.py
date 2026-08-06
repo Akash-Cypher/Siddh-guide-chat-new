@@ -811,6 +811,12 @@ def _build_context_from_hits(
             doc = doc[:max_chunk_chars].rsplit(" ", 1)[0] + "..."
 
         chunk = f"{header}\n{doc}"
+
+        # The real page link, so the model has one to quote verbatim. Previously
+        # no URL reached the context at all and it invented plausible ones.
+        url = (hit.get("url") or "").strip()
+        if url and url not in chunk:
+            chunk += f"\nPage URL: {url}"
         if total + len(chunk) > max_chars:
             remaining = max_chars - total
             if remaining <= 0:

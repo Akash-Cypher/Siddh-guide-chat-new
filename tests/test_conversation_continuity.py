@@ -644,6 +644,41 @@ def test_off_topic_is_still_refused(client, monkeypatch, rec):
     assert out["answer"] == main.REFUSAL_MESSAGE
 
 
+# ------------------------------------------------------------ page URLs
+
+def test_real_page_url_reaches_the_model(client, rec, monkeypatch):
+    """The model can only quote a URL it was given.
+
+    Live bug: no URL was in the context at all, so the model invented
+    'blog.siddhantaknowledge.org' — a subdomain that appears nowhere in the data.
+    """
+    real = "https://siddhantaknowledge.org/2026/04/20/town-planning-harappa-mohenjo-daro/"
+    monkeypatch.setattr(main, "retrieve_hits", lambda *a, **k: [{
+        "document": "Blog post about Harappan town planning and drainage systems.",
+        "source": "website.json",
+        "title": "Harappa town planning",
+        "url": real,
+        "distance": 0.05,
+    }])
+
+    rec.answer = "Harappan cities used planned drainage systems."
+    ask(client, "harappa town planning", session="url")
+
+    context = rec.calls[-1]["context"]
+    assert real in context, "the real page URL must be in the context"
+    assert "blog.siddhantaknowledge.org" not in context
+
+
+def test_context_has_no_url_when_the_entry_has_none(client, rec, monkeypatch):
+    monkeypatch.setattr(main, "retrieve_hits", lambda *a, **k: [{
+        "document": "Some page text with no link recorded.",
+        "source": "website.json", "title": "No link", "url": "", "distance": 0.05,
+    }])
+    rec.answer = "Some page text with no link recorded."
+    ask(client, "tell me about that page", session="nourl")
+    assert "Page URL:" not in rec.calls[-1]["context"]
+
+
 # --------------------------------- the model gets a chance before any refusal
 
 def test_unmatched_question_reaches_the_model_with_the_catalog(client, monkeypatch, rec):

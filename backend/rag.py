@@ -149,7 +149,13 @@ def build_index_from_json_folder(json_folder: str = "data") -> None:
                     doc_id = _make_unique_id(filename, raw_id, bump)
 
                 used_ids.add(doc_id)
-                meta = {"source": filename, "raw_id": raw_id or "", "title": title}
+                # The page URL travels with the chunk so the model can cite the real
+                # link. Without it the context had no URL at all and the model
+                # invented plausible-looking ones.
+                url = ""
+                if isinstance(item, dict):
+                    url = (item.get("source_url") or item.get("url") or item.get("link") or "").strip()
+                meta = {"source": filename, "raw_id": raw_id or "", "title": title, "url": url}
                 docs.append((doc_id, content, meta))
 
         elif isinstance(data, dict):
@@ -165,7 +171,8 @@ def build_index_from_json_folder(json_folder: str = "data") -> None:
                 bump += 1
 
             used_ids.add(doc_id)
-            meta = {"source": filename, "raw_id": raw_id or "", "title": title}
+            url = (data.get("source_url") or data.get("url") or data.get("link") or "").strip()
+            meta = {"source": filename, "raw_id": raw_id or "", "title": title, "url": url}
             docs.append((doc_id, content, meta))
 
     if not docs:
@@ -221,6 +228,7 @@ def retrieve_hits(
                 "source": meta.get("source", "doc"),
                 "title": (meta.get("title") or "").strip(),
                 "raw_id": meta.get("raw_id", ""),
+                "url": (meta.get("url") or "").strip(),
                 "distance": distance,
             }
         )
