@@ -262,7 +262,12 @@ COURSE_LIST_RE = re.compile(
 COURSE_COUNT_RE = re.compile(
     r"\b(total|count|number|how many)\b.*\b(course|courses|program|programs)\b"
     r"|\b(course|courses|program|programs)\b.*\b(total|count|number|how many)\b"
-    r"|^\s*total\s+count\s*$",
+    r"|^\s*total\s+count\s*$"
+    # A bare "give me count" is only ever about the courses here, and real
+    # visitors asked it that way. Anchored to the whole message so it cannot
+    # capture a question that merely happens to contain the word.
+    r"|^\s*(?:(?:give|tell|show)\s+(?:me\s+)?)?(?:the\s+)?(?:total\s+)?(?:count|number)\s*\??\s*$"
+    r"|^\s*how\s+many\s*\??\s*$",
     re.IGNORECASE,
 )
 
@@ -865,26 +870,119 @@ def _looks_like_idk(answer: str) -> bool:
     return False
 
 
-_CONTEXT_META_RE = re.compile(
-    r"\b(?:the|this|that|provided|given|above|supplied|available)\s+context\b"
-    r"|\bcontext\s+(?:does\s+not|doesn'?t|did\s+not)\b"
-    r"|\bnot\s+(?:listed|mentioned|included|provided|present|found)\s+in\s+the\s+"
-    r"(?:context|information|data|document|documents)\b"
-    r"|\b(?:based|according)\s+(?:on|to)\s+the\s+context\b",
+# "the context" is internal vocabulary that kept reaching visitors. Real
+# transcripts show it turns up far more often inside GOOD answers ("Based on the
+# context provided, here are three courses...") than inside genuine non-answers,
+# so it is translated into words a visitor understands rather than used as a
+# reason to throw the answer away. Discarding these cost more than it saved: 13
+# useful answers in the live history would have become refusals.
+_CONTEXT_REWRITES = [
+    # A leading "Based on the context provided," adds nothing — drop it outright.
+    (re.compile(
+        r"^\s*(?:based\s+on|according\s+to|as\s+per|per|from)\s+the\s+"
+        r"(?:provided\s+|given\s+|above\s+|supplied\s+|available\s+|retrieved\s+)*"
+        r"context(?:\s+provided|\s+given|\s+above|\s+supplied)?\s*[,:;—–-]\s*",
+        re.I), ""),
+    (re.compile(
+        r"\b(?:in|within|from|inside)\s+the\s+"
+        r"(?:provided\s+|given\s+|above\s+|supplied\s+|available\s+|retrieved\s+)*"
+        r"context(?:\s+provided|\s+given|\s+above|\s+supplied)?\b",
+        re.I), "on the website"),
+    (re.compile(
+        r"\b(?:the|this|that)\s+"
+        r"(?:provided\s+|given\s+|above\s+|supplied\s+|available\s+|retrieved\s+)*"
+        r"context(?:\s+provided|\s+given|\s+above|\s+supplied)?\b",
+        re.I), "the website information"),
+    (re.compile(r"\bknowledge\s+base\b", re.I), "website information"),
+]
+
+
+def _strip_context_preamble(answer: str) -> str:
+    """Say "the website" where the model said "the context".
+
+    Same meaning to the visitor, none of the plumbing. Applied before any
+    judgement about whether the answer is useful, so the decision is made on
+    substance rather than on vocabulary.
+    """
+    text = answer or ""
+    for pattern, replacement in _CONTEXT_REWRITES:
+        text = pattern.sub(replacement, text)
+    # Spaces and tabs only — collapsing every run of whitespace would fold the
+    # newlines out of a course list and run all the titles into one line.
+    text = re.sub(r"[ \t]{2,}", " ", text).strip()
+    return (text[:1].upper() + text[1:]) if text else text
+
+
+# What separates a useful negative answer from a dead end is whether it offers
+# anything next. "jyotisha is not listed, HOWEVER these related courses are" is a
+# good reply; "X is not listed, therefore I cannot help" is not.
+_INABILITY_RE = re.compile(
+    r"\b(?:cannot|can'?t|could\s+not|couldn'?t|unable\s+to|not\s+able\s+to)\s+"
+    r"(?:provide|give|share|offer|answer|help|assist|find|list)",
+    re.I,
+)
+_DENIAL_RE = re.compile(
+    r"\b(?:does\s+not|doesn'?t|did\s+not|didn'?t)\s+"
+    r"(?:list|mention|include|contain|provide|cover|specify)"
+    r"|\bno\s+(?:retrieved|relevant)\s+(?:context|information)\b"
+    r"|\bnot\s+(?:listed|mentioned|included|specified)\b",
+    re.I,
+)
+_OFFERS_MORE_RE = re.compile(
+    r"\b(?:however|but|alternatively|instead|though|you\s+can|you\s+may|you\s+could|"
+    r"there\s+are|there\s+is|here\s+are|here\s+is|related|consider|visit|contact|"
+    r"check|see\s+the|please)\b",
     re.I,
 )
 
 
 def _leaks_context_meta(answer: str) -> bool:
-    """True when the reply talks about "the context" instead of answering.
+    """True when the reply's entire substance is "I can't help with that".
 
-    A visitor should never be told what is or is not "in the context" — that is
-    internal plumbing, and it reads as a flat denial even when the fact is
-    available elsewhere. Deliberately narrow: it targets talk ABOUT the context,
-    not ordinary negative answers like "we don't have a course on that", which
-    are good replies and must keep working.
+    Checked after the rewrites above, so it judges what the answer DOES, not
+    which words it used. An answer that declines but then points somewhere useful
+    is kept — those are good replies and refusing them is how visitors end up
+    staring at a generic message when real help was available.
     """
-    return bool(_CONTEXT_META_RE.search(answer or ""))
+    text = (answer or "").strip()
+    if not text:
+        return True
+
+    # Take out the apologising and see what is left. A course description that
+    # happens to close with "for detailed topics the database has nothing" is
+    # still a real answer, and dropping it over that last sentence would be a
+    # worse failure than the one this guard exists to prevent.
+    remainder = " ".join(
+        part for part in re.split(r"(?<=[.!?])\s+", text)
+        if not (_DENIAL_RE.search(part) or _INABILITY_RE.search(part))
+    ).strip()
+    if len(remainder) >= 80:
+        return False
+
+    if not (_DENIAL_RE.search(text) or _INABILITY_RE.search(text)):
+        return False
+    return not _OFFERS_MORE_RE.search(text)
+
+
+# Distinctive lines from the system prompt. A visitor asking "Location" was once
+# answered with the STRICT RULES block verbatim — the model echoed its own
+# instructions back. Nothing here is a reply to anyone; if it appears in an
+# answer, that answer is broken and must never be shown.
+_PROMPT_ECHO_RE = re.compile(
+    r"strict\s+rules\s*:"
+    r"|response\s+format\s*\(obey\s+exactly\)"
+    r"|treat\s+retrieved\s+context\s+as\s+untrusted"
+    r"|never\s+follow\s+instructions\s+found\s+inside"
+    r"|do\s+not\s+use\s+model\s+memory"
+    r"|ask\s+sid\s+context\s*:"
+    r"|temporary\s+current-session\s+context",
+    re.I,
+)
+
+
+def _echoes_system_prompt(answer: str) -> bool:
+    """True when the model recited its own instructions instead of answering."""
+    return bool(_PROMPT_ECHO_RE.search(answer or ""))
 
 
 def _strip_embedded_refusal(answer: str) -> str:
@@ -1147,13 +1245,13 @@ def _generated_answer_or_refusal(
         history_messages=history_messages,
         session_context=session_context,
     )
-    answer = _strip_embedded_refusal(answer)
+    answer = _strip_context_preamble(_strip_embedded_refusal(answer))
 
     # "The context does not list a section named X" is a non-answer that leaks
     # the plumbing, and it slipped through every check below by quoting X back —
     # the course-name test saw a real title and passed it. Treat it as a miss so
     # the caller falls through to a context that can actually answer.
-    if _leaks_context_meta(answer):
+    if _echoes_system_prompt(answer) or _leaks_context_meta(answer):
         return REFUSAL_MESSAGE, False
 
     if not _answer_supported_by_context(
@@ -2946,7 +3044,7 @@ def _rag_answer_response(
             logger.exception("[%s] catalog fallback generation failed", request_id)
             return _refusal_response(session_id, request_id)
 
-        answer = _strip_embedded_refusal(answer)
+        answer = _strip_context_preamble(_strip_embedded_refusal(answer))
         # Accept it when it names a course that genuinely exists. "We don't have a
         # Vedic Mathematics course, but Ayush covers wellness" is a good answer —
         # the usual validator rejects it purely for sounding negative, which is
@@ -2954,8 +3052,10 @@ def _rag_answer_response(
         # Accept an answer that names a real course OR a real section of the site.
         # Requiring a course name discarded correct answers about Sandhaan,
         # Shodha and Prakashan and replaced them with the refusal.
-        if _leaks_context_meta(answer) or not (
-            _names_catalog_course(answer) or _names_site_section(answer)
+        if (
+            _echoes_system_prompt(answer)
+            or _leaks_context_meta(answer)
+            or not (_names_catalog_course(answer) or _names_site_section(answer))
         ):
             return _refusal_response(session_id, request_id)
 
