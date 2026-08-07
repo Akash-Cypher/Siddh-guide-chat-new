@@ -67,9 +67,9 @@ WEBSITE_DATA: list[dict] = []
 COURSE_CATALOG: list[dict] = []
 
 REFUSAL_MESSAGE = (
-    "I can help with Siddhanta course and website information. Please ask about "
-    "our courses, syllabus, learning outcomes, course recommendations, enrollment "
-    "details shown on the website, or Siddhanta Knowledge Foundation."
+    "I can help with anything on the Siddhanta websites — the courses, the "
+    "research and Sandhaan platforms, publications, events, and the foundation "
+    "itself. What would you like to know?"
 )
 
 SESSION_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,100}$")
@@ -772,13 +772,13 @@ def small_talk_kind(message: str) -> Optional[str]:
 # social replies so it has something true to be brief about, while carrying no
 # course data it could get wrong.
 _SMALL_TALK_BRIEF = {
-    "pleasantry": "Reply warmly in ONE short sentence, then ask what they would like to know about the courses.",
+    "pleasantry": "Reply warmly in ONE short sentence, then ask what they would like to know about Siddhanta.",
     "thanks": "Acknowledge the thanks in ONE short sentence and offer to help further. Do not list anything.",
     "farewell": "Say goodbye warmly in ONE short sentence. Do not list anything or ask a question.",
     "acknowledgement": "Reply in ONE short sentence inviting their next question. Do not list anything.",
     "frustration": "Apologise briefly in ONE or TWO sentences, without excuses, and ask them to tell you what they were looking for so you can try again.",
     "human": "Say in ONE or TWO sentences that you cannot transfer them to a person, and that the contact page on the website has the ways to reach the team.",
-    "bot_nature": "Confirm in ONE short sentence that you are an automated assistant for Siddhanta Knowledge Foundation, then offer to help with courses.",
+    "bot_nature": "Confirm in ONE short sentence that you are an automated assistant for Siddhanta Knowledge Foundation, then offer to help.",
     "unclear": "The message had no words in it. Say in ONE short sentence that you did not catch that, and ask what they would like to know.",
 }
 
@@ -2460,6 +2460,80 @@ def _catalog_context_for_course(course_title: str) -> tuple[str, list[str]]:
     return context, [f"courses_catalog.json | {real_title}"]
 
 
+def _describe_self(kind: str, user_message: str, request_id: str) -> str:
+    """Model-written self-description grounded in what the website really covers.
+
+    The fixed replies below name only courses, which is why the assistant kept
+    presenting itself as a course bot even though over half the crawled site is
+    research, publications, events and the platforms. Built from the live crawl,
+    so it stays accurate as sections are added.
+    """
+    site_ctx, _ = _site_overview_context(max_chars=1200)
+    if not site_ctx:
+        return ""
+
+    ask = (
+        "Describe in two short sentences what you can help this visitor with. "
+        "Cover the breadth shown in the context - the courses AND the other areas "
+        "such as research, publications, events and the platforms. Do not list "
+        "every item and do not use bullet points."
+        if kind == "capability"
+        else
+        "Say who you are in two short sentences: you are Ask Sid, the assistant "
+        "for Siddhanta Knowledge Foundation, and you can help with what the "
+        "context shows the websites cover - courses as well as research, "
+        "publications, events and the platforms. Do not list every item."
+    )
+
+    try:
+        answer = generate_answer(
+            user_message=f"Visitor asked: {user_message}\n{ask}",
+            context=site_ctx,
+        )
+    except Exception:
+        logger.exception("[%s] self-description generation failed", request_id)
+        return ""
+
+    answer = _strip_embedded_refusal(answer or "").strip()
+    if not answer or len(answer) > 420 or _looks_like_idk(answer):
+        return ""
+    return answer
+
+
+# Words that appear in many section titles and so identify nothing on their own.
+_SITE_NAME_STOPWORDS = {
+    "siddhanta", "knowledge", "foundation", "about", "overview", "page",
+    "platform", "policy", "terms", "privacy", "refund", "copyright", "contact",
+    "publications", "events", "research", "information", "system", "systems",
+}
+
+
+def _names_site_section(answer: str) -> bool:
+    """True when the answer mentions a real non-course section of the website.
+
+    The acceptance check used to demand a COURSE name, so a perfectly good answer
+    about Sandhaan, Shodha or Prakashan was discarded and replaced by the refusal.
+    """
+    text = (answer or "").lower()
+    if not text.strip():
+        return False
+
+    for entry in WEBSITE_DATA or []:
+        if (entry.get("category") or "").strip() == "course":
+            continue
+        title = (entry.get("title") or "").strip().lower()
+        if len(title) >= 5 and title in text:
+            return True
+        # A title is rarely quoted in full — the model writes "Prakashan", not
+        # "Prakashan (Publications)". Match the distinctive name inside it.
+        for word in re.findall(r"[a-z]{5,}", title):
+            if word in _SITE_NAME_STOPWORDS:
+                continue
+            if re.search(rf"\b{re.escape(word)}\b", text):
+                return True
+    return False
+
+
 def _names_catalog_course(answer: str) -> bool:
     """True when the answer mentions a course that actually exists."""
     text = (answer or "").lower()
@@ -2469,6 +2543,49 @@ def _names_catalog_course(answer: str) -> bool:
         (c.get("title") or "").strip() and (c.get("title") or "").strip().lower() in text
         for c in COURSE_CATALOG or []
     )
+
+
+def _site_overview_context(max_chars: int = 2500) -> tuple[str, list[str]]:
+    """What the whole website covers, not just the courses.
+
+    Siddhanta is more than a course catalog — over half the crawled pages are
+    research (Shodha), the Sandhaan platforms, publications, events and the
+    foundation itself. Falling back to the course catalog alone made every
+    unmatched question come back as a course suggestion. Built from the live
+    crawl, so new sections appear without a code change.
+    """
+    if not WEBSITE_DATA:
+        return "", []
+
+    by_category: dict[str, list[str]] = {}
+    for entry in WEBSITE_DATA:
+        category = (entry.get("category") or "").strip()
+        title = (entry.get("title") or "").strip()
+        # Courses are covered by the catalog context; this is everything else.
+        if not category or not title or category == "course":
+            continue
+        by_category.setdefault(category, [])
+        if title not in by_category[category]:
+            by_category[category].append(title)
+
+    if not by_category:
+        return "", []
+
+    lines, used = [], 0
+    for category in sorted(by_category):
+        titles = ", ".join(by_category[category][:12])
+        line = f"- {category}: {titles}"
+        if used + len(line) > max_chars:
+            break
+        lines.append(line)
+        used += len(line)
+
+    context = (
+        "[source=website.json | Siddhanta website sections]\n"
+        "Areas the Siddhanta websites cover, besides the individual courses:\n"
+        + "\n".join(lines)
+    )
+    return context, ["website.json | Siddhanta website"]
 
 
 def _catalog_overview_context(max_chars: int = 6000) -> tuple[str, list[str]]:
@@ -2619,6 +2736,13 @@ def _rag_answer_response(
             return _refusal_response(session_id, request_id)
 
         all_ctx, all_cits = _catalog_overview_context()
+        # Over half the site is research, publications, events and the platforms.
+        # Offering only the course catalog turned every unmatched question into a
+        # course suggestion.
+        site_ctx, site_cits = _site_overview_context()
+        if site_ctx:
+            all_ctx = (all_ctx + "\n\n" + site_ctx) if all_ctx else site_ctx
+            all_cits = list(dict.fromkeys((all_cits or []) + site_cits))
         if not all_ctx:
             return _refusal_response(session_id, request_id)
 
@@ -2626,10 +2750,12 @@ def _rag_answer_response(
             answer = generate_answer(
                 user_message=(
                     f"Visitor asked: {user_message}\n"
-                    "Answer using only the course list in the context. If a course "
-                    "matches, describe it. If nothing matches, say so plainly and "
-                    "point them to the closest courses that ARE listed. Never name a "
-                    "course that is not in the list."
+                    "The context lists the courses AND the other areas of the "
+                    "Siddhanta websites — research, publications, events, the "
+                    "platforms. Answer from whichever part actually fits the "
+                    "question; do not steer a non-course question towards courses. "
+                    "If nothing in the context fits, say so plainly. Never name a "
+                    "course or section that is not in the context."
                 ),
                 context=all_ctx,
                 history_messages=history_messages,
@@ -2644,7 +2770,10 @@ def _rag_answer_response(
         # Vedic Mathematics course, but Ayush covers wellness" is a good answer —
         # the usual validator rejects it purely for sounding negative, which is
         # what left visitors staring at the generic refusal.
-        if not _names_catalog_course(answer):
+        # Accept an answer that names a real course OR a real section of the site.
+        # Requiring a course name discarded correct answers about Sandhaan,
+        # Shodha and Prakashan and replaced them with the refusal.
+        if not (_names_catalog_course(answer) or _names_site_section(answer)):
             return _refusal_response(session_id, request_id)
 
         supported = True
@@ -2803,7 +2932,7 @@ async def chat(
             # rather than inventing something here.
 
         if is_about_bot(routing_message):
-            answer = ABOUT_BOT_REPLY
+            answer = _describe_self("identity", user_message, request_id) or ABOUT_BOT_REPLY
             _safe_put_message(
                 session_id=session_id,
                 role="assistant",
@@ -2815,7 +2944,7 @@ async def chat(
             return _response(answer, ["local"], 0, request_id)
 
         if is_capability_question(routing_message):
-            answer = CAPABILITY_REPLY
+            answer = _describe_self("capability", user_message, request_id) or CAPABILITY_REPLY
             _safe_put_message(
                 session_id=session_id,
                 role="assistant",

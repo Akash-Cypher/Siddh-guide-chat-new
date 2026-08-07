@@ -57,10 +57,23 @@ def assert_refusal(response):
 
 def test_refusal_message_is_user_friendly():
     lowered = REFUSAL.lower()
+    # No internal vocabulary, no dead-end phrasing.
     assert "knowledge base" not in lowered
     assert "i don" not in lowered
     assert "not available" not in lowered
-    assert "please ask about" in lowered
+    # It must invite the visitor to try again rather than just decline.
+    assert "?" in REFUSAL or "please ask" in lowered
+
+
+def test_refusal_message_covers_the_whole_site_not_just_courses():
+    """Over half the crawled site is research, publications and events. A refusal
+    that names only courses tells visitors the assistant is narrower than it is."""
+    lowered = REFUSAL.lower()
+    assert "course" in lowered
+    non_course = ("research", "publication", "event", "sandhaan", "foundation")
+    assert any(word in lowered for word in non_course), (
+        "the refusal should reflect the whole website, not only courses"
+    )
 
 
 def test_kb_question_returns_grounded_answer_with_citation(client, monkeypatch):

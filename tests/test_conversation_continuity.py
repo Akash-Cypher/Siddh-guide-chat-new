@@ -819,6 +819,55 @@ def test_genuine_recommendation_requests_still_route(monkeypatch, message):
     assert main._is_recommendation_request(message) or main.mentions_catalog_subject(message)
 
 
+# ------------------------------------------- the site is more than courses
+
+SITE = [
+    {"category": "research", "title": "Shodha - Indic Thought Models", "content": "..."},
+    {"category": "research", "title": "Sandhaan - Jyotisha", "content": "..."},
+    {"category": "publication", "title": "Prakashan (Publications)", "content": "..."},
+    {"category": "events", "title": "Events", "content": "..."},
+    {"category": "platform", "title": "Siddhanta Kosha", "content": "..."},
+    {"category": "course", "title": "Some Course", "content": "..."},
+]
+
+
+def test_site_overview_lists_non_course_sections(monkeypatch):
+    monkeypatch.setattr(main, "WEBSITE_DATA", SITE)
+    context, citations = main._site_overview_context()
+
+    assert "Shodha - Indic Thought Models" in context
+    assert "Prakashan (Publications)" in context
+    assert "Siddhanta Kosha" in context
+    # Courses are supplied separately by the catalog context.
+    assert "Some Course" not in context
+    assert citations == ["website.json | Siddhanta website"]
+
+
+def test_answer_about_research_is_accepted_not_refused(monkeypatch):
+    """The acceptance check demanded a COURSE name, so a correct answer about
+    Sandhaan or Prakashan was thrown away and replaced by the refusal."""
+    monkeypatch.setattr(main, "WEBSITE_DATA", SITE)
+    monkeypatch.setattr(main, "COURSE_CATALOG", CATALOG)
+
+    assert main._names_site_section("Prakashan (Publications) is our publishing arm.")
+    assert main._names_site_section("You can explore Sandhaan - Jyotisha for that.")
+    assert not main._names_site_section("We have nothing on that topic.")
+
+
+def test_non_course_question_reaches_the_model_with_site_context(client, monkeypatch, rec):
+    monkeypatch.setattr(main, "WEBSITE_DATA", SITE)
+    monkeypatch.setattr(main, "COURSE_CATALOG", CATALOG)
+    monkeypatch.setattr(main, "retrieve_hits", lambda *a, **k: [])
+
+    rec.answer = "Prakashan (Publications) is the foundation's publishing work."
+    out = ask(client, "what publications do you have", session="pub")
+
+    assert out["status"] == "ok"
+    context = rec.calls[-1]["context"]
+    assert "Prakashan (Publications)" in context, "site sections must reach the model"
+    assert out["answer"] == rec.answer
+
+
 # ------------------------------------------------------------ page URLs
 
 def test_real_page_url_reaches_the_model(client, rec, monkeypatch):
