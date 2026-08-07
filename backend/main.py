@@ -42,7 +42,7 @@ from config import (
     SESSION_ID_MAX_LEN,
     USE_HISTORY_FOR_CONTINUITY,
 )
-from models import generate_answer
+from models import generate_answer, generate_social_reply
 from rag import init_rag, retrieve_hits
 
 logging.basicConfig(
@@ -77,7 +77,16 @@ TITLE_SEPARATOR_RE = re.compile(r"\s+[\-\u2013\u2014]\s+")
 
 PROMPT_INJECTION_RE = re.compile(
     r"\b(ignore|bypass|forget|override|disregard)\b.*\b(instruction|instructions|rules|context|system|policy|knowledge base)\b"
-    r"|\b(from|using)\s+(your\s+)?(own|general|outside)\s+knowledge\b",
+    r"|\b(from|using)\s+(your\s+)?(own|general|outside)\s+knowledge\b"
+    # Role reassignment: "you are now a general assistant", "act as a tutor",
+    # "pretend you are ChatGPT", "from now on you are ...". These carry no
+    # ignore/forget verb, so the patterns above missed them entirely.
+    r"|\byou\s+are\s+now\b"
+    r"|\bfrom\s+now\s+on\b.*\byou\b"
+    r"|\b(act|behave|respond)\s+as\s+(a|an|if)\b"
+    r"|\bpretend\s+(you|to\s+be)\b"
+    r"|\byour\s+new\s+(role|instructions?|task)\b"
+    r"|\b(system|developer)\s+(prompt|message)\b",
     re.IGNORECASE,
 )
 
@@ -139,7 +148,9 @@ GREETINGS = {
 # refused. Still anchored at both ends, so a real question that merely opens with
 # "hi" ("hi, what is the fee for X?") is not swallowed as a bare greeting.
 _GREETING_RE = re.compile(
-    r"^(?:hi+|hey+|he?llo+|helo+|namaste|namaskar|hari\s*om|greetings|"
+    r"^(?:hi+|hey+|he?llo+|helo+|hlo+|namaste|namaskar|hari\s*om|greetings|"
+    r"g(?:oo|u)d\s*(?:morning|mrng|mrning|morn|aftrnoon|afternoon|"
+    r"evening|evng|eve|night|nite|day)|"
     r"good\s+(?:morning|afternoon|evening|day))"
     r"(?:[\s,!.-]+(?:sid|ask\s*sid|there|team|bot|all|everyone))?"
     r"[\s!.?]*$",
@@ -161,6 +172,8 @@ ABOUT_BOT_KEYWORDS = [
     # they fall through to RAG, the KB has nothing about the assistant, and the
     # visitor gets the generic refusal.
     "your name",
+    "ur name",
+    "aap kaun",
     "call you",
     "introduce yourself",
     "who is ask sid",
@@ -636,8 +649,174 @@ def is_greeting(message: str) -> bool:
     return msg.lower() in GREETINGS or bool(_GREETING_RE.match(msg))
 
 
+# --------------------------------------------------------------------------- #
+# Social messages.
+#
+# A visitor says "thanks", "how are you", "ok", or gets frustrated. None of these
+# are knowledge-base questions, but every one of them used to fall through the
+# whole routing chain into the catalog fallback and get answered with a list of
+# courses. Each pattern is anchored to the WHOLE message, so "how are you — also
+# what is the fee?" is NOT treated as small talk and still reaches the real
+# routing chain.
+#
+# Deliberately excluded: jokes, weather, politics, coding and other off-topic
+# requests. Those must keep refusing, and tests pin that.
+# --------------------------------------------------------------------------- #
+_SMALL_TALK = {
+    "pleasantry": re.compile(
+        r"^\s*(?:hi+\s+|hey\s+|hello\s+)?(?:how\s+(?:are|r)\s+(?:you|u|ya)(?:\s+doing)?|"
+        r"how'?s\s+it\s+going|how\s+do\s+you\s+do|what'?s\s+up|wassup|sup)\s*[?!.]*\s*$",
+        re.I,
+    ),
+    "thanks": re.compile(
+        r"^\s*(?:ok(?:ay)?\s+)?(?:thanks?|thank\s+you|thx|ty|tysm|shukriya|dhanyavad)"
+        r"(?:\s+(?:a\s+lot|so\s+much|very\s+much|bro|sir|maam|ma'am))?\s*[!.]*\s*$",
+        re.I,
+    ),
+    "farewell": re.compile(
+        r"^\s*(?:ok(?:ay)?\s+)?(?:bye+|goodbye|bye\s+bye|see\s+(?:you|ya)|cya|"
+        r"take\s+care|good\s?night|talk\s+later)\s*[!.]*\s*$",
+        re.I,
+    ),
+    "acknowledgement": re.compile(
+        r"^\s*(?:ok(?:ay)?|k+|hmm+|mm+|yes|yeah|yep|yup|no|nope|nice|good|great|"
+        r"cool|fine|alright|sure|got\s+it|understood|noted)\s*[!.]*\s*$",
+        re.I,
+    ),
+    "frustration": re.compile(
+        r"^\s*(?:this\s+(?:bot\s+)?is\s+|the\s+bot\s+is\s+|you\s+are\s+|ur\s+|you'?re\s+)?"
+        r"(?:useless|useless\s+bot|stupid|stupid\s+bot|dumb|worst|worst\s+bot|"
+        r"bad\s+bot|you\s+suck|not\s+helpful|not\s+working|rubbish|nonsense|"
+        r"shut\s+up|waste\s+of\s+time)\s*[!.]*\s*$",
+        re.I,
+    ),
+    "human": re.compile(
+        r"^\s*(?:i\s+)?(?:want|need|can\s+i|would\s+like)?\s*(?:to\s+)?"
+        r"(?:talk|speak|connect|chat)?\s*(?:to|with)?\s*(?:a\s+|an\s+|the\s+)?"
+        r"(?:human|person|real\s+person|agent|someone|somebody|staff|executive)"
+        r"\s*(?:please)?\s*[?!.]*\s*$",
+        re.I,
+    ),
+    "bot_nature": re.compile(
+        r"^\s*(?:are\s+you\s+(?:a\s+)?(?:bot|robot|human|real|ai|machine|chatgpt|gpt)"
+        r"(?:\s+or\s+[a-z\s]+)?|r\s+u\s+(?:a\s+)?(?:bot|human|real)|"
+        r"do\s+you\s+have\s+feelings)\s*[?!.]*\s*$",
+        re.I,
+    ),
+}
+
+
+# Real messages combine social bits — "ok bye thanks for the help", "this bot is
+# useless", "acha thik hai". Anchored single-phrase patterns cannot cover those
+# combinations, so a message also counts as social when EVERY word in it is
+# either a social word or filler. That generalises to orderings nobody listed.
+_SOCIAL_WORDS = {
+    "frustration": {"useless", "stupid", "dumb", "worst", "suck", "sucks", "rubbish",
+                    "nonsense", "waste", "terrible", "horrible", "bakwas"},
+    "farewell": {"bye", "goodbye", "cya", "goodnight", "night", "later", "alvida"},
+    "thanks": {"thanks", "thank", "thanku", "thankyou", "thx", "ty", "tysm",
+               "shukriya", "dhanyavad", "dhanyawad"},
+    "acknowledgement": {"ok", "okay", "k", "kk", "hmm", "mm", "yes", "yeah", "yep",
+                        "yup", "no", "nope", "nice", "good", "great", "cool", "fine",
+                        "alright", "sure", "got", "understood", "noted", "done",
+                        "acha", "accha", "thik", "theek", "hai", "haan", "ji"},
+}
+
+# Words that carry no intent of their own in a social message.
+_SOCIAL_FILLER = {
+    "the", "a", "an", "you", "your", "u", "ur", "is", "are", "am", "this", "that",
+    "it", "for", "help", "helping", "me", "my", "so", "much", "very", "lot", "lots",
+    "bot", "sid", "sir", "madam", "maam", "please", "pls", "and", "then", "all",
+    "was", "were", "be", "been", "im", "i", "to", "of", "not", "really", "quite",
+}
+
+# When several categories appear at once, the most important one wins.
+_SOCIAL_PRIORITY = ["frustration", "farewell", "thanks", "acknowledgement"]
+
+
+def _social_word_kind(msg: str) -> Optional[str]:
+    words = re.findall(r"[a-z']+", msg.lower())
+    if not words or len(words) > 8:
+        return None
+
+    found = set()
+    for word in words:
+        matched = next((k for k, vocab in _SOCIAL_WORDS.items() if word in vocab), None)
+        if matched:
+            found.add(matched)
+        elif word not in _SOCIAL_FILLER:
+            return None          # a real content word — this is a question
+    if not found:
+        return None
+    return next(k for k in _SOCIAL_PRIORITY if k in found)
+
+
+def small_talk_kind(message: str) -> Optional[str]:
+    """Which social category this message is, or None if it is a real question."""
+    msg = _norm(message)
+    if not msg or len(msg.split()) > 8:
+        return None
+
+    # Punctuation or symbols only ("?", "???", "..."): the visitor is signalling
+    # confusion, not asking anything searchable.
+    if not re.search(r"[a-z0-9]", msg, re.I):
+        return "unclear"
+
+    for kind, pattern in _SMALL_TALK.items():
+        if pattern.match(msg):
+            return kind
+    return _social_word_kind(msg)
+
+
+# What Ask Sid is, expressed as scope rather than facts. Given to the model for
+# social replies so it has something true to be brief about, while carrying no
+# course data it could get wrong.
+_SMALL_TALK_BRIEF = {
+    "pleasantry": "Reply warmly in ONE short sentence, then ask what they would like to know about the courses.",
+    "thanks": "Acknowledge the thanks in ONE short sentence and offer to help further. Do not list anything.",
+    "farewell": "Say goodbye warmly in ONE short sentence. Do not list anything or ask a question.",
+    "acknowledgement": "Reply in ONE short sentence inviting their next question. Do not list anything.",
+    "frustration": "Apologise briefly in ONE or TWO sentences, without excuses, and ask them to tell you what they were looking for so you can try again.",
+    "human": "Say in ONE or TWO sentences that you cannot transfer them to a person, and that the contact page on the website has the ways to reach the team.",
+    "bot_nature": "Confirm in ONE short sentence that you are an automated assistant for Siddhanta Knowledge Foundation, then offer to help with courses.",
+    "unclear": "The message had no words in it. Say in ONE short sentence that you did not catch that, and ask what they would like to know.",
+}
+
+
+def _small_talk_answer(user_message: str, kind: str, request_id: str) -> str:
+    """A model-written social reply, or "" if it cannot be trusted.
+
+    Written by the model rather than picked from a list, so it varies naturally.
+    It is given no course data at all, so it has nothing to get wrong — and the
+    checks below reject anything that strays into facts, links or length.
+    """
+    try:
+        answer = generate_social_reply(user_message, _SMALL_TALK_BRIEF[kind])
+    except Exception:
+        logger.exception("[%s] social reply generation failed", request_id)
+        return ""
+
+    answer = _strip_embedded_refusal(answer or "").strip()
+    if not answer or len(answer) > 320:
+        return ""
+    lowered = answer.lower()
+    # It has no data, so any link, figure or course name would be invented.
+    if "http" in lowered or "www." in lowered or re.search(r"\d", answer):
+        logger.info("[%s] social reply rejected: contained a link or figure", request_id)
+        return ""
+    if _names_catalog_course(answer):
+        logger.info("[%s] social reply rejected: named a course", request_id)
+        return ""
+    return answer
+
+
 def is_about_bot(message: str) -> bool:
     msg = _norm(message).lower()
+    # "about you" is matched as a bare substring, so "tell me about your courses"
+    # and "what about your fees" used to be answered with the bot's own
+    # description instead of the course information actually asked for.
+    if _MENTIONS_COURSE_RE.search(msg) or re.search(r"\bfee|price|cost\b", msg):
+        return False
     return any(k in msg for k in ABOUT_BOT_KEYWORDS)
 
 
@@ -1707,20 +1886,16 @@ _RECOMMEND_VERB_RE = re.compile(
     # "course related to robotics". These should match against the catalog, not
     # fall through to a refusal. (A named course is still excluded below.)
     r"|\bcourses?\s+(?:on|about|related to|relevant to|regarding|for|in|of)\b"
-    r"|\bany\s+courses?\b"
-    # ... OR a plainly stated intent to study something: "i would like to take
-    # sanskrit", "i want to learn ayurveda", "looking for something in law".
-    # These carry a subject but no recommend/suggest verb, so they used to fall
-    # through to retrieval and get refused.
-    r"|\bi\s*(?:'d|\s+would)?\s*(?:like|want|wish|wanna|need)\s*(?:to)?\s*"
-    r"(?:take|do|join|learn|study|buy|enrol|enroll|pursue|start)\b"
-    r"|\b(?:i\s*(?:am|'m)\s+)?looking\s+for\b",
+    r"|\bany\s+courses?\b",
     re.I,
 )
 
 _REC_GENERIC_TOKENS = {
     "subject", "subjects", "field", "fields", "based", "interest", "interests",
     "topic", "topics", "area", "areas", "stream", "background", "domain",
+    # Placeholders, not subjects. "suggest something" names no subject at all,
+    # so it should ask the visitor for their field rather than be discarded.
+    "something", "anything", "some", "any", "good", "best", "nice", "suitable",
 }
 
 
@@ -1976,13 +2151,35 @@ def _profile_allowed_tokens(profile: dict) -> frozenset:
     return frozenset(words)
 
 
+# A plainly stated intent to study something — "i would like to take sanskrit",
+# "i want to learn ayurveda", "looking for something in law". On a course
+# website these are course requests by their nature, whatever subject follows,
+# so they skip the topical guard below.
+_STUDY_INTENT_RE = re.compile(
+    r"\bi\s*(?:'d|\s+would)?\s*(?:like|want|wish|wanna|need)\s*(?:to)?\s*"
+    r"(?:take|do|join|learn|study|buy|enrol|enroll|pursue|start)\b"
+    r"|\b(?:i\s*(?:am|'m)\s+)?looking\s+for\b",
+    re.I,
+)
+
+
 def _is_recommendation_request(message: str) -> bool:
-    if not _RECOMMEND_VERB_RE.search(_norm(message)):
+    msg = _norm(message)
+    study_intent = bool(_STUDY_INTENT_RE.search(msg))
+    if not study_intent and not _RECOMMEND_VERB_RE.search(msg):
         return False
     # If a specific course is named, it's a detail question, not a recommendation.
     if COURSE_DATA and find_course_title_in_message(message, COURSE_DATA):
         return False
-    return True
+    if study_intent:
+        return True
+    # "suggest a good movie" and "recommend a stock to buy" match the verb but are
+    # not course requests. A bare recommend/suggest must also be about study: it
+    # names course/programme, names a subject we actually teach, or names no
+    # subject at all ("suggest something"), where we ask what field they are in.
+    if _MENTIONS_COURSE_RE.search(msg) or mentions_catalog_subject(msg):
+        return True
+    return not _recommendation_subject_terms(msg)
 
 
 # Words that appear across most course titles carry no signal ("indian",
@@ -2415,6 +2612,12 @@ def _rag_answer_response(
         # Nothing matched by search. Rather than refuse outright — which is what
         # a misspelling or an unusual phrasing produces — give the model the real
         # catalog and let it work out the intent.
+        # The catalog fallback exists to rescue misspelled or oddly phrased COURSE
+        # questions. An off-topic question must not reach it — otherwise "what is
+        # the weather" gets answered with a course list.
+        if is_out_of_domain_query(user_message):
+            return _refusal_response(session_id, request_id)
+
         all_ctx, all_cits = _catalog_overview_context()
         if not all_ctx:
             return _refusal_response(session_id, request_id)
@@ -2583,6 +2786,21 @@ async def chat(
                 context_used=0,
             )
             return _response(answer, ["local"], 0, request_id)
+
+        # Social messages never touch the knowledge base. Before this, "thanks"
+        # and "how are you" fell through every route into the catalog fallback
+        # and were answered with a list of courses.
+        talk_kind = small_talk_kind(routing_message)
+        if talk_kind:
+            answer = _small_talk_answer(user_message, talk_kind, request_id)
+            if answer:
+                _safe_put_message(
+                    session_id=session_id, role="assistant", text=answer,
+                    request_id=request_id, sources=["social"], context_used=0,
+                )
+                return _response(answer, ["social"], 0, request_id)
+            # Generation failed or was rejected — fall through to normal routing
+            # rather than inventing something here.
 
         if is_about_bot(routing_message):
             answer = ABOUT_BOT_REPLY
