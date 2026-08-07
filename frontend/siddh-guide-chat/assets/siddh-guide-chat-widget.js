@@ -156,10 +156,16 @@ document.addEventListener('DOMContentLoaded', () => {
   function showWelcome() {
     if (welcomeShown) return;
     welcomeShown = true;
+    // Deliberately fixed text, and the only fixed text left. It is shown before
+    // a conversation exists, so there is nothing yet to respond to — and asking
+    // the backend to write it would mean a model call on every page load, paid
+    // for whether or not the visitor ever types. What it must be is accurate:
+    // this named only courses, while over half the site is research, the
+    // Sandhaan platforms, publications and events.
     addMessage(
-      'Hi! I’m Ask Sid. I can help you explore Siddhanta’s IKS courses, '
-      + 'suggest ones that fit your background, and point you to enrollment details. '
-      + 'What would you like to know?',
+      'Hi! I’m Ask Sid. Ask me about anything on the Siddhanta websites — '
+      + 'the courses, the research and Sandhaan platforms, publications, events, '
+      + 'or the foundation itself. What would you like to know?',
       'bot'
     );
   }

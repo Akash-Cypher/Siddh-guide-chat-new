@@ -783,31 +783,54 @@ _SMALL_TALK_BRIEF = {
 }
 
 
-def _small_talk_answer(user_message: str, kind: str, request_id: str) -> str:
-    """A model-written social reply, or "" if it cannot be trusted.
+def _written_reply(
+    user_message: str,
+    instruction: str,
+    request_id: str,
+    *,
+    allowed_numbers: frozenset = frozenset(),
+    allow_course_names: bool = False,
+    max_chars: int = 320,
+) -> str:
+    """A model-written line of conversation, or "" if it cannot be trusted.
 
-    Written by the model rather than picked from a list, so it varies naturally.
-    It is given no course data at all, so it has nothing to get wrong — and the
-    checks below reject anything that strays into facts, links or length.
+    The single seam every conversational reply goes through, so the assistant
+    speaks in its own words rather than in canned sentences. It is handed no
+    course data, so anything factual it produced would be invented — hence the
+    guards. Facts stay the caller's job: the model writes the sentence, the code
+    supplies the numbers. Callers keep their own wording as the fallback, so a
+    generation failure degrades to the old fixed text instead of to silence.
     """
     try:
-        answer = generate_social_reply(user_message, _SMALL_TALK_BRIEF[kind])
+        answer = generate_social_reply(user_message, instruction)
     except Exception:
-        logger.exception("[%s] social reply generation failed", request_id)
+        logger.exception("[%s] reply generation failed", request_id)
         return ""
 
     answer = _strip_embedded_refusal(answer or "").strip()
-    if not answer or len(answer) > 320:
+    if not answer or len(answer) > max_chars:
         return ""
+
     lowered = answer.lower()
-    # It has no data, so any link, figure or course name would be invented.
-    if "http" in lowered or "www." in lowered or re.search(r"\d", answer):
-        logger.info("[%s] social reply rejected: contained a link or figure", request_id)
+    if "http" in lowered or "www." in lowered:
+        logger.info("[%s] written reply rejected: contained a link", request_id)
         return ""
-    if _names_catalog_course(answer):
-        logger.info("[%s] social reply rejected: named a course", request_id)
+
+    # Any figure the caller did not explicitly vouch for is one the model made up.
+    if set(re.findall(r"\d+", answer)) - {str(n) for n in allowed_numbers}:
+        logger.info("[%s] written reply rejected: unverified figure", request_id)
         return ""
+
+    if not allow_course_names and _names_catalog_course(answer):
+        logger.info("[%s] written reply rejected: named a course", request_id)
+        return ""
+
     return answer
+
+
+def _small_talk_answer(user_message: str, kind: str, request_id: str) -> str:
+    """A model-written social reply, or "" if it cannot be trusted."""
+    return _written_reply(user_message, _SMALL_TALK_BRIEF[kind], request_id)
 
 
 def is_about_bot(message: str) -> bool:
@@ -840,6 +863,28 @@ def _looks_like_idk(answer: str) -> bool:
     if len(a) < 6:
         return True
     return False
+
+
+_CONTEXT_META_RE = re.compile(
+    r"\b(?:the|this|that|provided|given|above|supplied|available)\s+context\b"
+    r"|\bcontext\s+(?:does\s+not|doesn'?t|did\s+not)\b"
+    r"|\bnot\s+(?:listed|mentioned|included|provided|present|found)\s+in\s+the\s+"
+    r"(?:context|information|data|document|documents)\b"
+    r"|\b(?:based|according)\s+(?:on|to)\s+the\s+context\b",
+    re.I,
+)
+
+
+def _leaks_context_meta(answer: str) -> bool:
+    """True when the reply talks about "the context" instead of answering.
+
+    A visitor should never be told what is or is not "in the context" — that is
+    internal plumbing, and it reads as a flat denial even when the fact is
+    available elsewhere. Deliberately narrow: it targets talk ABOUT the context,
+    not ordinary negative answers like "we don't have a course on that", which
+    are good replies and must keep working.
+    """
+    return bool(_CONTEXT_META_RE.search(answer or ""))
 
 
 def _strip_embedded_refusal(answer: str) -> str:
@@ -1103,6 +1148,13 @@ def _generated_answer_or_refusal(
         session_context=session_context,
     )
     answer = _strip_embedded_refusal(answer)
+
+    # "The context does not list a section named X" is a non-answer that leaks
+    # the plumbing, and it slipped through every check below by quoting X back —
+    # the course-name test saw a real title and passed it. Treat it as a miss so
+    # the caller falls through to a context that can actually answer.
+    if _leaks_context_meta(answer):
+        return REFUSAL_MESSAGE, False
 
     if not _answer_supported_by_context(
         answer, context, extra_allowed_tokens=extra_allowed_tokens
@@ -1993,6 +2045,70 @@ def _clean_field(raw: str) -> str:
     return _ROLE_TO_FIELD.get(field.lower(), field.lower())
 
 
+def _catalog_titles_in(text: str) -> list[str]:
+    """Real catalog titles named in a message, ordered by where they appear.
+
+    Ordering by position matters: the course a visitor mentions first is the one
+    they are talking about. Catalog order is an implementation detail and means
+    nothing to them.
+    """
+    low = (text or "").lower()
+    if not low.strip() or not COURSE_CATALOG:
+        return []
+
+    found: list[tuple[int, str]] = []
+    for c in COURSE_CATALOG:
+        title = (c.get("title") or "").strip()
+        if not title:
+            continue
+        at = low.find(title.lower())
+        if at >= 0:
+            found.append((at, title))
+
+    found.sort(key=lambda pair: (pair[0], -len(pair[1])))
+    titles = [t for _, t in found]
+    # Drop a title that is only part of a longer one that also matched, so a
+    # short title cannot shadow the fuller course name the visitor actually typed.
+    return [
+        t for t in titles
+        if not any(other != t and t.lower() in other.lower() for other in titles)
+    ]
+
+
+_NON_SUBJECT_CATEGORY_RE = re.compile(
+    r"\b(?:courses?|programs?|programmes?|upcoming|new|latest|featured|popular|all|misc|other|general)\b",
+    re.I,
+)
+
+
+def _catalog_subject_examples(limit: int = 7) -> list[str]:
+    """Subject areas that genuinely exist in the catalog, in catalog order.
+
+    Offered to a visitor who has not named a subject yet. Derived from the live
+    categories so the assistant can never invite someone to ask about a field
+    Siddhanta does not actually teach.
+    """
+    seen: list[str] = []
+    lowered: set[str] = set()
+    for entry in COURSE_CATALOG or []:
+        cats = entry.get("categories") or []
+        if not isinstance(cats, list):
+            cats = [cats]
+        for c in cats:
+            name = str(c).strip()
+            if not name or name.lower() in lowered:
+                continue
+            # Some categories label the catalog rather than a field of study —
+            # "Upcoming Courses" is a shelf, not something to study. Filtered by
+            # shape, not by a list of approved subjects, so real subjects still
+            # come entirely from the data.
+            if _NON_SUBJECT_CATEGORY_RE.search(name):
+                continue
+            lowered.add(name.lower())
+            seen.append(name)
+    return seen[:limit]
+
+
 def _session_profile(recent_messages: Optional[list[dict]]) -> dict:
     """Temporary preferences stated by the user in THIS session.
 
@@ -2012,11 +2128,15 @@ def _session_profile(recent_messages: Optional[list[dict]]) -> dict:
         # Course under discussion: taken from either side of the conversation,
         # but only ever accepted if it is a real catalog title.
         if not profile["preferred_course"] and COURSE_CATALOG:
-            for c in COURSE_CATALOG:
-                title = (c.get("title") or "").strip()
-                if title and title.lower() in text.lower():
-                    profile["preferred_course"] = title
-                    break
+            hits = _catalog_titles_in(text)
+            # A message naming many courses is a LIST, not a discussion of one of
+            # them. This used to take the first match in catalog order, so after
+            # the assistant listed every course the "course under discussion"
+            # became whichever row happened to be first in the catalog — and a
+            # visitor picking a course off that list was then answered from a
+            # completely unrelated course's row.
+            if hits and len(hits) <= 3:
+                profile["preferred_course"] = hits[0]
 
         # Self-described facts come from the user only. Assistant text is model
         # output and must never become a "fact about the user".
@@ -2105,7 +2225,36 @@ def is_own_profile_question(message: str) -> bool:
     return True
 
 
-def _own_profile_answer(profile: dict) -> str:
+def _own_profile_answer(profile: dict, user_message: str = "", request_id: str = "") -> str:
+    """What we remember about the visitor, written back to them.
+
+    Only what they themselves said is repeated, and it is passed in rather than
+    generated, so the model can phrase the sentence but never invent the fact.
+    """
+    if profile.get("field"):
+        stated, brief = profile["field"], (
+            f"Tell them, in ONE short sentence, that they said their field is "
+            f"\"{profile['field']}\", and to say so if that has changed. Quote "
+            f"the field exactly and mention nothing else about them."
+        )
+    elif profile.get("interests"):
+        stated, brief = profile["interests"][0], (
+            f"Tell them, in ONE or TWO short sentences, that they have not said "
+            f"what their field is but did mention an interest in "
+            f"\"{profile['interests'][0]}\", then ask for their field or "
+            f"background. Quote the interest exactly."
+        )
+    else:
+        stated, brief = "", (
+            "Say in ONE short sentence that you do not know their field or "
+            "background yet, and ask them for it."
+        )
+
+    written = _written_reply(user_message, brief, request_id, allow_course_names=True)
+    # Only trust it if the detail they actually stated survived intact.
+    if written and (not stated or stated.lower() in written.lower()):
+        return written
+
     if profile.get("field"):
         return (
             f"You told me your field is {profile['field']}. Tell me if that has "
@@ -2313,10 +2462,24 @@ def _recommend_courses_response(
 
     # No subject in the request AND none stated earlier this session -> ask.
     if not subject_terms:
-        answer = (
-            "Sure — which subject or field are you interested in? For example: "
-            "management, law, architecture, Sanskrit, agriculture, psychology, or "
-            "education. Tell me the area and I'll suggest matching courses."
+        # The examples come from the catalog's own categories. They used to be a
+        # hand-written list, so the assistant could invite a visitor to ask about
+        # a subject Siddhanta does not actually teach.
+        examples = _catalog_subject_examples()
+        example_text = ", ".join(examples)
+        answer = _written_reply(
+            user_message,
+            "Ask them, in ONE short sentence, which subject or field they are "
+            "interested in so you can suggest something."
+            + (
+                f" Offer examples, and use only these subjects: {example_text}."
+                if examples else ""
+            ),
+            request_id,
+        ) or (
+            "Sure — which subject or field are you interested in?"
+            + (f" For example: {example_text}." if examples else "")
+            + " Tell me the area and I'll suggest matching courses."
         )
         _safe_put_message(
             session_id=session_id, role="assistant", text=answer,
@@ -2602,27 +2765,38 @@ def _catalog_overview_context(max_chars: int = 6000) -> tuple[str, list[str]]:
     if not COURSE_CATALOG:
         return "", []
 
-    lines: list[str] = []
-    used = 0
-    for entry in COURSE_CATALOG:
-        title = (entry.get("title") or "").strip()
-        if not title:
-            continue
-        cats = entry.get("categories") or []
-        cat_text = ", ".join(str(c) for c in cats) if isinstance(cats, list) else str(cats)
-        line = (
-            f"- {title}"
-            f" | categories: {cat_text or 'not listed'}"
-            f" | price: {entry.get('price') or 'not listed'}"
-            f" | duration: {entry.get('duration') or 'not listed'}"
-            f" | audience: {entry.get('audience') or 'not listed'}"
-        )
-        if entry.get("url"):
-            line += f" | page: {entry['url']}"
-        if used + len(line) > max_chars:
+    def _rows(detail: str) -> list[str]:
+        out: list[str] = []
+        for entry in COURSE_CATALOG:
+            title = (entry.get("title") or "").strip()
+            if not title:
+                continue
+            if detail == "title":
+                out.append(f"- {title}")
+                continue
+            cats = entry.get("categories") or []
+            cat_text = ", ".join(str(c) for c in cats) if isinstance(cats, list) else str(cats)
+            line = (
+                f"- {title}"
+                f" | categories: {cat_text or 'not listed'}"
+                f" | price: {entry.get('price') or 'not listed'}"
+                f" | duration: {entry.get('duration') or 'not listed'}"
+            )
+            if detail == "full":
+                line += f" | audience: {entry.get('audience') or 'not listed'}"
+                if entry.get("url"):
+                    line += f" | page: {entry['url']}"
+            out.append(line)
+        return out
+
+    # Every course must survive into the context. Truncating the list mid-way
+    # silently dropped the tail of the catalog, so when a visitor picked one of
+    # those courses off the list the model could not see it and answered that it
+    # did not exist. Shed detail per row instead of dropping whole courses.
+    for detail in ("full", "compact", "title"):
+        lines = _rows(detail)
+        if sum(len(line) for line in lines) <= max_chars or detail == "title":
             break
-        lines.append(line)
-        used += len(line)
 
     if not lines:
         return "", []
@@ -2719,7 +2893,14 @@ def _rag_answer_response(
         # the model that course's catalog row and let it answer from there. Blank
         # fields are marked "not listed on the website" in the context, so it can
         # say so truthfully rather than invent a value.
-        cat_ctx, cat_cits = _catalog_context_for_course(profile.get("preferred_course", ""))
+        #
+        # A course named in THIS message always wins over one inferred from
+        # history: replying to a list of courses with one of their names is the
+        # commonest way a visitor asks for detail, and the history-derived course
+        # is by definition the previous topic, not this one.
+        named_now = _catalog_titles_in(routing_message or user_message)
+        course_now = named_now[0] if named_now else profile.get("preferred_course", "")
+        cat_ctx, cat_cits = _catalog_context_for_course(course_now)
         if cat_ctx:
             answer, supported = _answer_from(cat_ctx, cat_cits)
             if supported:
@@ -2773,7 +2954,9 @@ def _rag_answer_response(
         # Accept an answer that names a real course OR a real section of the site.
         # Requiring a course name discarded correct answers about Sandhaan,
         # Shodha and Prakashan and replaced them with the refusal.
-        if not (_names_catalog_course(answer) or _names_site_section(answer)):
+        if _leaks_context_meta(answer) or not (
+            _names_catalog_course(answer) or _names_site_section(answer)
+        ):
             return _refusal_response(session_id, request_id)
 
         supported = True
@@ -2905,7 +3088,13 @@ async def chat(
         )
 
         if is_greeting(routing_message):
-            answer = "Hello! How can I assist you today?"
+            # Written fresh each time. A fixed greeting is the first thing every
+            # visitor sees, and the same sentence on every visit is the clearest
+            # possible signal that they are talking to a script.
+            answer = (
+                _small_talk_answer(user_message, "pleasantry", request_id)
+                or "Hello! How can I assist you today?"
+            )
             _safe_put_message(
                 session_id=session_id,
                 role="assistant",
@@ -2959,7 +3148,9 @@ async def chat(
         # Answered from the current session's own turns, so a refreshed page
         # (new session id, no turns) correctly says it does not know.
         if is_own_profile_question(routing_message):
-            answer = _own_profile_answer(_session_profile(recent_before))
+            answer = _own_profile_answer(
+                _session_profile(recent_before), user_message, request_id
+            )
             _safe_put_message(
                 session_id=session_id,
                 role="assistant",
@@ -2978,22 +3169,31 @@ async def chat(
             # back to the static courses.json snapshot only when it is absent.
             if COURSE_CATALOG:
                 count = len(COURSE_CATALOG)
-                answer = (
-                    f"There are {count} courses currently listed on Siddhanta's "
-                    "Siksha platform (siksha.siddhantaknowledge.org)."
-                )
                 sources = ["courses_catalog.json"]
                 citations = ["courses_catalog.json | Siksha live catalog"]
             else:
                 titles = _unique_course_titles(COURSE_DATA) if COURSE_DATA else []
                 if not titles:
                     return _refusal_response(session_id, request_id)
-                answer = (
-                    f"There are {len(titles)} courses available in the current "
-                    "Ask Sid course database."
-                )
+                count = len(titles)
                 sources = ["courses.json"]
                 citations = ["courses.json"]
+
+            # The count is counted, never written by the model — allowed_numbers
+            # rejects any reply that states a different figure. The sentence
+            # around it is the model's, so the same question asked twice does not
+            # come back word for word.
+            answer = _written_reply(
+                user_message,
+                f"Tell them, in ONE short sentence, that Siddhanta's Siksha "
+                f"platform currently lists {count} courses. State the number "
+                f"{count} exactly and give no other figure.",
+                request_id,
+                allowed_numbers=frozenset({count}),
+            ) or (
+                f"There are {count} courses currently listed on Siddhanta's "
+                "Siksha platform."
+            )
 
             _safe_put_message(
                 session_id=session_id,
@@ -3009,6 +3209,14 @@ async def chat(
             newest = _latest_courses(limit=3)
             if newest:
                 top = newest[0]
+                # Deliberately assembled in code, not written by the model. This
+                # is a data readout — a title, a date, a price — and the exact
+                # values matter more than the phrasing. test_kb_only_chat.py
+                # asserts this path never calls the model; that guarantee is
+                # worth more than varied wording, and a model rewriting
+                # "2026-07-06" as "6 July 2026" would be a regression, not a
+                # polish. The rule is: the model writes conversation, the code
+                # renders data.
                 parts = [
                     f"The most recently added course on Siddhanta's Siksha platform is "
                     f"“{top['title']}” (listed {top['published']})."
@@ -3071,11 +3279,34 @@ async def chat(
 
             shown = titles[:45]
             more = len(titles) - len(shown)
+            # The titles are rendered from the catalog, never written by the
+            # model — asking it to reproduce a list of this length is exactly how
+            # courses get dropped or invented. Only the sentence framing the list
+            # is generated.
+            lead = _written_reply(
+                user_message,
+                f"Introduce a list of courses in ONE short sentence, saying that "
+                f"Siksha currently has {len(titles)} of them. State the number "
+                f"{len(titles)} exactly and give no other figure. Do not list any "
+                f"course — the list follows your sentence. End with a colon.",
+                request_id,
+                allowed_numbers=frozenset({len(titles)}),
+                max_chars=160,
+            ) or f"Here are the {len(titles)} courses currently available on Siksha:"
+
+            closing = _written_reply(
+                user_message,
+                "In ONE short question, invite them to pick one of the courses "
+                "just listed to hear more about. Name no course.",
+                request_id,
+                max_chars=120,
+            ) or "Which one would you like details about?"
+
             answer = (
-                f"Here are the {len(titles)} courses currently available on Siksha:\n\n"
+                lead + "\n\n"
                 + "\n".join([f"• {t}" for t in shown])
                 + (f"\n\n…and {more} more." if more > 0 else "")
-                + "\n\nWhich one would you like details about?"
+                + f"\n\n{closing}"
             )
 
             _safe_put_message(

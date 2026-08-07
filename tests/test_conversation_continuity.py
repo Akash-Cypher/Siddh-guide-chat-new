@@ -1105,3 +1105,179 @@ def test_grounding_is_not_weakened_by_session_context(client, rec):
     rec.answer = "The fee is 9999 rupees and it runs for 3 days."
     out = ask(client, "What is its duration?")
     assert out["status"] == "refused", "unsupported numbers must still be refused"
+
+
+# ------------------------------------------------- picking a course off a list
+
+def test_a_long_course_list_does_not_become_the_course_under_discussion(monkeypatch):
+    """After the assistant lists every course, none of them is "the" course.
+
+    This took the first match in CATALOG order, so the topic silently became
+    whichever course happened to be listed first in the data file.
+    """
+    monkeypatch.setattr(main, "COURSE_CATALOG", CATALOG)
+    listing = "Here are the courses:\n" + "\n".join(
+        f"- {c['title']}" for c in CATALOG
+    )
+    profile = main._session_profile([{"role": "assistant", "text": listing}])
+    assert profile["preferred_course"] == ""
+
+
+def test_one_named_course_still_becomes_the_course_under_discussion(monkeypatch):
+    """The narrowing above must not break ordinary single-course follow-ups."""
+    monkeypatch.setattr(main, "COURSE_CATALOG", CATALOG)
+    profile = main._session_profile(
+        [{"role": "assistant", "text": "Samskrit 1: Thinking in Samskrit is online."}]
+    )
+    assert profile["preferred_course"] == "Samskrit 1: Thinking in Samskrit"
+
+
+def test_catalog_titles_are_ordered_by_where_they_appear(monkeypatch):
+    monkeypatch.setattr(main, "COURSE_CATALOG", CATALOG)
+    text = "Compare Samskrit 1: Thinking in Samskrit with Vedic Mathematics Foundations"
+    assert main._catalog_titles_in(text)[0] == "Samskrit 1: Thinking in Samskrit"
+
+
+def test_naming_a_course_from_the_list_answers_about_that_course(client, rec, monkeypatch):
+    """The reported bug: reply to a course list with one of its names.
+
+    Retrieval is emptied so this exercises the single-course fallback, which is
+    the path production took. The course the visitor just typed must win over
+    the one inferred from history — otherwise they are handed an unrelated
+    course's row and told their course does not exist.
+    """
+    monkeypatch.setattr(main, "retrieve_hits", lambda *a, **k: [])
+    listing = "Here are the courses:\n" + "\n".join(f"- {c['title']}" for c in CATALOG)
+    history = [{"role": "assistant", "text": listing}]
+
+    rec.answer = "Samskrit 1: Thinking in Samskrit is listed under language."
+    main._rag_answer_response(
+        user_message="Samskrit 1: Thinking in Samskrit",
+        history_messages=[],
+        session_id="pick",
+        request_id="r1",
+        recent_messages=history,
+    )
+
+    # The first generation after retrieval misses is the single-course fallback.
+    context = rec.calls[0]["context"]
+    assert "Samskrit 1: Thinking in Samskrit" in context, (
+        "the course the visitor named must be the one described to the model"
+    )
+    assert "Indian Knowledge Systems for Engineers" not in context, (
+        "the course under discussion must not be taken from the listing"
+    )
+
+
+def test_every_course_survives_into_the_catalog_context(monkeypatch):
+    """Truncation dropped the tail of the catalog, so courses the bot had just
+    listed were invisible to the model and reported as non-existent.
+
+    The budget here is deliberately far too small: detail per row may be shed,
+    but a course may never disappear.
+    """
+    monkeypatch.setattr(main, "COURSE_CATALOG", CATALOG)
+    context, _ = main._catalog_overview_context(max_chars=200)
+    for course in CATALOG:
+        assert course["title"] in context, f"{course['title']} was dropped"
+
+
+def test_talking_about_the_context_is_not_an_answer(client, rec):
+    """"The context does not list X" quoted a real course name and so passed the
+    acceptance check, sending internal plumbing to the visitor."""
+    rec.answer = (
+        "The context does not list a specific section named "
+        "'Samskrit 1: Thinking in Samskrit'. Therefore, I cannot provide information."
+    )
+    out = ask(client, "tell me about Samskrit 1: Thinking in Samskrit")
+    assert "context" not in out["answer"].lower()
+
+
+def test_an_honest_negative_answer_still_reaches_the_visitor(client, rec):
+    """The guard above must not swallow good answers that happen to say no."""
+    assert not main._leaks_context_meta(
+        "We don't have a course on astrophysics, but "
+        "Indian Knowledge Systems for Engineers covers technical subjects."
+    )
+
+
+# ------------------------------------------------- replies are written, not canned
+
+def social(monkeypatch, reply):
+    """Make the model return `reply` for every conversational line."""
+    monkeypatch.setattr(main, "generate_social_reply", lambda m, i: reply)
+
+
+def test_the_greeting_is_written_not_canned(client, monkeypatch):
+    social(monkeypatch, "Good to see you — what would you like to know?")
+    out = ask(client, "hello")
+    assert out["answer"] == "Good to see you — what would you like to know?"
+
+
+def test_the_greeting_falls_back_when_generation_fails(client, monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("bedrock down")
+    monkeypatch.setattr(main, "generate_social_reply", boom)
+    out = ask(client, "hello")
+    assert out["answer"], "a failed generation must never leave the visitor with nothing"
+
+
+def test_subject_examples_come_from_the_real_catalog(monkeypatch):
+    """These were hand-written, so they could offer a subject nobody teaches."""
+    monkeypatch.setattr(main, "COURSE_CATALOG", CATALOG)
+    examples = main._catalog_subject_examples()
+    assert examples, "examples must be derived from the catalog"
+    real = {c.lower() for entry in CATALOG for c in entry["categories"]}
+    assert {e.lower() for e in examples} <= real
+
+
+def test_a_written_reply_may_not_invent_a_figure(client, monkeypatch):
+    monkeypatch.setattr(main, "COURSE_CATALOG", CATALOG)
+    social(monkeypatch, f"We run {len(CATALOG) + 9} courses right now.")
+    out = ask(client, "how many courses do you have")
+    assert str(len(CATALOG) + 9) not in out["answer"], "an invented count must be rejected"
+    assert str(len(CATALOG)) in out["answer"], "the real count must survive"
+
+
+def test_a_written_reply_carrying_the_true_count_is_kept(client, monkeypatch):
+    monkeypatch.setattr(main, "COURSE_CATALOG", CATALOG)
+    social(monkeypatch, f"There are {len(CATALOG)} courses on Siksha at the moment.")
+    out = ask(client, "how many courses do you have")
+    assert out["answer"] == f"There are {len(CATALOG)} courses on Siksha at the moment."
+
+
+def test_a_written_reply_may_not_smuggle_in_a_link(client, monkeypatch):
+    social(monkeypatch, "Hi! See https://example.com for details.")
+    out = ask(client, "hello")
+    assert "example.com" not in out["answer"]
+
+
+def test_the_course_list_is_rendered_from_data_not_written(client, monkeypatch):
+    """The model frames the list; it must never be trusted to reproduce it."""
+    monkeypatch.setattr(main, "COURSE_CATALOG", CATALOG)
+    social(monkeypatch, f"Siksha currently has {len(CATALOG)} courses:")
+    out = ask(client, "list all courses")
+    for course in CATALOG:
+        assert course["title"] in out["answer"], f"{course['title']} missing from the list"
+
+
+def test_what_we_remember_is_never_reworded_away(client, monkeypatch):
+    """The model may phrase it, but the field the visitor stated must survive.
+
+    A reply that quietly generalises "engineering" into "something technical" is
+    rejected, and the exact wording is used instead.
+    """
+    social(monkeypatch, "You mentioned you work in something technical.")
+    ask(client, "I am an engineer.", session="mem")
+    out = ask(client, "what is my field", session="mem")
+    assert "engineer" in out["answer"].lower()
+
+
+def test_what_we_remember_keeps_a_faithful_written_reply(client, monkeypatch):
+    """The guard above must not reject a good reply that keeps the field."""
+    social(monkeypatch, "You said your field is engineering — tell me if that changed.")
+    ask(client, "I am an engineer.", session="mem2")
+    out = ask(client, "what is my field", session="mem2")
+    assert out["answer"] == (
+        "You said your field is engineering — tell me if that changed."
+    )
