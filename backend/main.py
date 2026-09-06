@@ -35,6 +35,7 @@ from config import (
     LOG_LEVEL,
     MAX_MESSAGE_CHARS,
     MODEL_HISTORY_MAX_CHARS,
+    NOVA_MODEL_ID,
     RAG_DEFAULT_K,
     RAG_MAX_CHUNK_CHARS,
     RAG_MAX_CONTEXT_CHARS,
@@ -42,6 +43,7 @@ from config import (
     SESSION_ID_MAX_LEN,
     USE_HISTORY_FOR_CONTINUITY,
 )
+from errors import ModelBackendError
 from models import generate_answer, generate_social_reply
 from rag import init_rag, retrieve_hits
 
@@ -58,6 +60,15 @@ _continuity_degraded: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "continuity_degraded", default=False
 )
 
+# Set when a model call failed but the route had truthful canned text to fall
+# back on (greetings, self-description). The visitor still gets a good reply, so
+# this must not fail the request - but the response and the logs have to say the
+# assistant is running degraded, otherwise a total outage is indistinguishable
+# from ordinary traffic. That is exactly how the /chat 500s went unnoticed.
+_model_degraded: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "model_degraded", default=False
+)
+
 faq_data: list[dict] = []
 COURSE_DATA: list[dict] = []
 WEBSITE_DATA: list[dict] = []
@@ -70,6 +81,15 @@ REFUSAL_MESSAGE = (
     "I can help with anything on the Siddhanta websites — the courses, the "
     "research and Sandhaan platforms, publications, events, and the foundation "
     "itself. What would you like to know?"
+)
+
+# Said when the model backend is unreachable. Deliberately NOT the refusal
+# above: the refusal claims the assistant can help with anything on the site,
+# which is a lie while every request is failing, and it tells the visitor to
+# rephrase a question that was never the problem.
+SERVICE_UNAVAILABLE_MESSAGE = (
+    "I can\u2019t reach my knowledge service at the moment, so I can\u2019t answer "
+    "that right now. Please try again in a minute."
 )
 
 SESSION_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,100}$")
@@ -390,8 +410,35 @@ async def _crawl_loop() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _reload_kb_from_disk()
-    init_rag()
-    logger.info("Startup complete: KB loaded + RAG initialized")
+
+    if not NOVA_MODEL_ID:
+        # Every /chat model call will fail until this is set on the service.
+        # Saying so once at boot beats discovering it from a visitor's screenshot.
+        logger.error(
+            "NOVA_MODEL_ID is not set - answer generation will fail for every "
+            "request. Set it in the App Runner service environment."
+        )
+
+    rag_ready = True
+    try:
+        init_rag()
+    except ModelBackendError:
+        # A broken vector store must not crash-loop the service: /health and the
+        # non-retrieval routes still work, and /chat now degrades per request.
+        rag_ready = False
+        logger.exception("RAG init failed; retrieval will be unavailable")
+
+    # Swallowing the failure above means this line is now reachable after a
+    # failed init, where before it aborted startup. Saying "RAG initialized"
+    # there would hand a deploy check the one signal it trusts while every
+    # knowledge-base answer is the outage notice. The healthy string is
+    # unchanged, so existing log scans still match.
+    logger.info(
+        "Startup complete: KB loaded + RAG %s",
+        "initialized"
+        if rag_ready
+        else "UNAVAILABLE (knowledge-base answers will be the outage notice)",
+    )
 
     crawl_task: Optional[asyncio.Task] = None
     if AUTO_CRAWL:
@@ -788,6 +835,17 @@ _SMALL_TALK_BRIEF = {
 }
 
 
+def _flag_model_degraded(request_id: str, where: str) -> None:
+    """Record that a model call failed but the route had truthful text to use.
+
+    Called only where the fallback is genuinely a good reply - "Hello! How can I
+    assist you today?" is correct whether or not Bedrock answered. The flag is
+    what stops that from being silent.
+    """
+    _model_degraded.set(True)
+    logger.error("[%s] model backend unavailable during %s", request_id, where)
+
+
 def _written_reply(
     user_message: str,
     instruction: str,
@@ -808,6 +866,11 @@ def _written_reply(
     """
     try:
         answer = generate_social_reply(user_message, instruction)
+    except ModelBackendError:
+        # The caller's own canned sentence is a fine reply for small talk, so the
+        # visitor is not disturbed - but the turn is marked degraded.
+        _flag_model_degraded(request_id, "social reply")
+        return ""
     except Exception:
         logger.exception("[%s] reply generation failed", request_id)
         return ""
@@ -1938,6 +2001,9 @@ def _response(
         # "degraded" means this turn was not fully recorded / history was not
         # readable, so follow-ups may not resolve. Never claim "ok" in that case.
         "continuity": "degraded" if _continuity_degraded.get() else "ok",
+        # "degraded" means the model backend failed and this reply came from
+        # fixed text rather than from the model.
+        "model": "degraded" if _model_degraded.get() else "ok",
     }
 
 
@@ -2635,6 +2701,11 @@ def _recommend_courses_response(
             history_messages=history_messages,
             session_context=session_block,
         )
+    except ModelBackendError:
+        # Answering "I can help with anything on the Siddhanta websites" while the
+        # backend is down tells the visitor to rephrase a question that was never
+        # the problem. Let it reach the handler that says what is actually wrong.
+        raise
     except Exception:
         logger.exception("[%s] recommendation generation failed", request_id)
         return _refusal_response(session_id, request_id)
@@ -2751,6 +2822,9 @@ def _describe_self(kind: str, user_message: str, request_id: str) -> str:
             user_message=f"Visitor asked: {user_message}\n{ask}",
             context=site_ctx,
         )
+    except ModelBackendError:
+        _flag_model_degraded(request_id, "self-description")
+        return ""
     except Exception:
         logger.exception("[%s] self-description generation failed", request_id)
         return ""
@@ -3040,6 +3114,8 @@ def _rag_answer_response(
                 history_messages=history_messages,
                 session_context=_session_context_block(profile),
             )
+        except ModelBackendError:
+            raise
         except Exception:
             logger.exception("[%s] catalog fallback generation failed", request_id)
             return _refusal_response(session_id, request_id)
@@ -3080,6 +3156,11 @@ def health() -> Dict:
         "courses_live": len(COURSE_CATALOG),
         "website_entries": len(WEBSITE_DATA),
         "auto_crawl": AUTO_CRAWL,
+        # Whether the deployment can generate answers at all. An unset
+        # NOVA_MODEL_ID fails every model call while /health still said "ok",
+        # so a broken deploy looked healthy. Booleans only - no values.
+        "nova_model_configured": bool(NOVA_MODEL_ID),
+        "chat_api_key_configured": bool(CHAT_API_KEY),
     }
 
 
@@ -3134,6 +3215,7 @@ async def chat(
 ) -> Dict:
     request_id = str(uuid.uuid4())[:8]
     _continuity_degraded.set(False)
+    _model_degraded.set(False)
 
     try:
         _check_api_key(x_api_key)
@@ -3448,6 +3530,10 @@ async def chat(
                     course_specific = _course_aware_answer(
                         user_message, history_messages, recent_before, profile
                     )
+                except ModelBackendError:
+                    # faq.json needs no model, so the curated answer below is a
+                    # real answer rather than a cover-up. Still flagged.
+                    _flag_model_degraded(request_id, "course-aware FAQ answer")
                 except Exception:
                     logger.exception(
                         "[%s] course-aware FAQ attempt failed; using curated FAQ",
@@ -3510,6 +3596,26 @@ async def chat(
 
     except HTTPException:
         raise
+    except ModelBackendError as exc:
+        # Bedrock (generation or embeddings) or the vector store is unreachable.
+        # This used to escape as a 500, which the widget rendered as "Sorry,
+        # something went wrong. Please try again." - a dead end that told nobody
+        # what was broken. Answer honestly with 200 so the visitor actually reads
+        # the message, and log at ERROR so the cause is one CloudWatch query away.
+        logger.error(
+            "[%s] model backend unavailable, answering with the outage notice: %s",
+            request_id,
+            exc,
+        )
+        _model_degraded.set(True)
+        return _response(
+            SERVICE_UNAVAILABLE_MESSAGE,
+            ["unavailable"],
+            0,
+            request_id,
+            citations=[],
+            status="unavailable",
+        )
     except Exception:
         logger.exception("[%s] Unhandled error in /chat", request_id)
         raise HTTPException(status_code=500, detail="Internal error")

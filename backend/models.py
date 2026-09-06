@@ -5,6 +5,7 @@ from typing import List, Optional
 import boto3
 
 from config import AWS_BOTO_CONFIG, AWS_REGION, NOVA_MODEL_ID
+from errors import ModelBackendError
 
 logger = logging.getLogger("siddh_guide.models")
 
@@ -14,12 +15,60 @@ _bedrock_client = None
 def _get_bedrock_client():
     global _bedrock_client
     if _bedrock_client is None:
-        _bedrock_client = boto3.client(
-            "bedrock-runtime",
-            region_name=AWS_REGION,
-            config=AWS_BOTO_CONFIG,
-        )
+        try:
+            _bedrock_client = boto3.client(
+                "bedrock-runtime",
+                region_name=AWS_REGION,
+                config=AWS_BOTO_CONFIG,
+            )
+        except Exception as exc:
+            logger.exception("could not construct the Bedrock client")
+            raise ModelBackendError(
+                f"Bedrock client unavailable: {type(exc).__name__}: {exc}"
+            ) from exc
     return _bedrock_client
+
+
+def _require_model_id() -> str:
+    """The configured Nova model id, or a diagnosis of why there isn't one.
+
+    An unset NOVA_MODEL_ID is a deployment misconfiguration, not a code bug, and
+    it is invisible until someone tries to chat. Reporting it as a backend error
+    puts the cause in the log line that the failed request already writes.
+    """
+    if not NOVA_MODEL_ID:
+        raise ModelBackendError(
+            "NOVA_MODEL_ID is not set - the text-generation model is not "
+            "configured for this deployment"
+        )
+    return NOVA_MODEL_ID
+
+
+def _invoke(client, model_id: str, body: dict, *, what: str) -> dict:
+    """One Bedrock invocation, with every transport failure typed the same way.
+
+    Callers should not have to know the difference between a throttle, an
+    expired credential, a model that is not enabled in this region and a socket
+    timeout: all of them mean the same thing to a visitor, and all of them used
+    to reach FastAPI as an unhandled exception.
+    """
+    # Serialised outside the try on purpose: a body that cannot be encoded is a
+    # bug in this file, not an outage, and must not be dressed up as one.
+    payload = json.dumps(body)
+
+    try:
+        response = client.invoke_model(
+            modelId=model_id,
+            body=payload,
+            accept="application/json",
+            contentType="application/json",
+        )
+        return json.loads(response["body"].read())
+    except Exception as exc:
+        logger.exception("Bedrock %s call failed (model=%s)", what, model_id)
+        raise ModelBackendError(
+            f"Bedrock {what} call failed: {type(exc).__name__}: {exc}"
+        ) from exc
 
 
 def _build_system_prompt(context: str, session_context: str = "") -> str:
@@ -127,8 +176,7 @@ def _build_social_prompt() -> str:
 
 def generate_social_reply(user_message: str, instruction: str) -> str:
     """A short conversational reply. No knowledge base, no citations."""
-    if not NOVA_MODEL_ID:
-        raise RuntimeError("NOVA_MODEL_ID environment variable is required")
+    model_id = _require_model_id()
 
     client = _get_bedrock_client()
     body = {
@@ -139,13 +187,7 @@ def generate_social_reply(user_message: str, instruction: str) -> str:
         "inferenceConfig": {"maxTokens": 90, "temperature": 0.4, "topP": 0.9},
     }
 
-    response = client.invoke_model(
-        modelId=NOVA_MODEL_ID,
-        body=json.dumps(body),
-        accept="application/json",
-        contentType="application/json",
-    )
-    result = json.loads(response["body"].read())
+    result = _invoke(client, model_id, body, what="social reply")
 
     try:
         return result["output"]["message"]["content"][0]["text"].strip()
@@ -184,8 +226,7 @@ def generate_answer(
     history_messages: Optional[List[dict]] = None,
     session_context: str = "",
 ) -> str:
-    if not NOVA_MODEL_ID:
-        raise RuntimeError("NOVA_MODEL_ID environment variable is required")
+    model_id = _require_model_id()
 
     if not context or not context.strip():
         raise ValueError("generate_answer requires retrieved knowledge base context")
@@ -209,14 +250,7 @@ def generate_answer(
         },
     }
 
-    response = client.invoke_model(
-        modelId=NOVA_MODEL_ID,
-        body=json.dumps(body),
-        accept="application/json",
-        contentType="application/json",
-    )
-
-    result = json.loads(response["body"].read())
+    result = _invoke(client, model_id, body, what="answer")
 
     try:
         return result["output"]["message"]["content"][0]["text"].strip()

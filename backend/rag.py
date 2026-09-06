@@ -15,6 +15,7 @@ from config import (
     CHROMA_PATH,
     RAG_MAX_DISTANCE,
 )
+from errors import ModelBackendError
 
 logger = logging.getLogger("siddh_guide.rag")
 
@@ -26,21 +27,35 @@ _bedrock = None
 def _get_bedrock():
     global _bedrock
     if _bedrock is None:
-        _bedrock = boto3.client("bedrock-runtime", region_name=AWS_REGION, config=AWS_BOTO_CONFIG)
+        try:
+            _bedrock = boto3.client(
+                "bedrock-runtime", region_name=AWS_REGION, config=AWS_BOTO_CONFIG
+            )
+        except Exception as exc:
+            logger.exception("could not construct the Bedrock client for embeddings")
+            raise ModelBackendError(
+                f"Bedrock client unavailable: {type(exc).__name__}: {exc}"
+            ) from exc
     return _bedrock
 
 
 def _get_collection():
     global _client, _collection
     if _collection is None:
-        _client = chromadb.PersistentClient(
-            path=CHROMA_PATH,
-            settings=Settings(anonymized_telemetry=False),
-        )
-        _collection = _client.get_or_create_collection(
-            name=CHROMA_COLLECTION,
-            metadata={"hnsw:space": "cosine"},
-        )
+        try:
+            _client = chromadb.PersistentClient(
+                path=CHROMA_PATH,
+                settings=Settings(anonymized_telemetry=False),
+            )
+            _collection = _client.get_or_create_collection(
+                name=CHROMA_COLLECTION,
+                metadata={"hnsw:space": "cosine"},
+            )
+        except Exception as exc:
+            logger.exception("could not open the Chroma collection at %s", CHROMA_PATH)
+            raise ModelBackendError(
+                f"vector store unavailable: {type(exc).__name__}: {exc}"
+            ) from exc
     return _collection
 
 
@@ -60,18 +75,26 @@ def _embed_texts(texts: List[str]) -> List[List[float]]:
 
         body = {"inputText": t}
 
-        resp = br.invoke_model(
-            modelId=BEDROCK_EMBED_MODEL_ID,
-            body=json.dumps(body),
-            accept="application/json",
-            contentType="application/json",
-        )
+        try:
+            resp = br.invoke_model(
+                modelId=BEDROCK_EMBED_MODEL_ID,
+                body=json.dumps(body),
+                accept="application/json",
+                contentType="application/json",
+            )
+            payload = json.loads(resp["body"].read())
+        except Exception as exc:
+            logger.exception(
+                "Bedrock embedding call failed (model=%s)", BEDROCK_EMBED_MODEL_ID
+            )
+            raise ModelBackendError(
+                f"Bedrock embedding call failed: {type(exc).__name__}: {exc}"
+            ) from exc
 
-        payload = json.loads(resp["body"].read())
         emb = payload.get("embedding") or payload.get("vector") or payload.get("embeddings")
 
         if not emb:
-            raise RuntimeError(f"Bedrock embedding failed: {payload}")
+            raise ModelBackendError(f"Bedrock returned no embedding: {payload}")
 
         vectors.append(emb)
 
@@ -201,11 +224,17 @@ def retrieve_hits(
     collection = _get_collection()
     q_emb = _embed_texts([question])[0]
 
-    results = collection.query(
-        query_embeddings=[q_emb],
-        n_results=max(1, k),
-        include=["documents", "metadatas", "distances"],
-    )
+    try:
+        results = collection.query(
+            query_embeddings=[q_emb],
+            n_results=max(1, k),
+            include=["documents", "metadatas", "distances"],
+        )
+    except Exception as exc:
+        logger.exception("vector search failed")
+        raise ModelBackendError(
+            f"vector search failed: {type(exc).__name__}: {exc}"
+        ) from exc
 
     docs = results.get("documents", [[]])[0]
     metas = results.get("metadatas", [[]])[0]
