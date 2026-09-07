@@ -63,8 +63,30 @@ def init_rag() -> None:
     _get_collection()
 
 
+# Cross-region inference profiles prefix the provider with a geography, so the
+# provider is not the first dotted token: "apac.cohere.embed-v4:0".
+_GEO_PREFIXES = {"us", "eu", "apac", "global", "us-gov"}
+
+
+def _model_family(model_id: str) -> str:
+    """Provider name from a bare id, a profile id, or a full inference-profile ARN.
+
+    All three forms are legitimate values for BEDROCK_EMBED_MODEL_ID, and in
+    regions where a model is only invocable through a profile the ARN is the
+    ONLY working value - which is exactly how NOVA_MODEL_ID is already
+    configured. Reading the provider from the first dotted token would see
+    "arn:aws:bedrock:ap-south-1:123456789012:inference-profile/apac" and fall
+    back to Amazon's request format for a Cohere model.
+    """
+    ident = model_id.rsplit("/", 1)[-1]        # ARN -> "apac.cohere.embed-v4:0"
+    parts = [p for p in ident.split(".") if p]
+    if len(parts) > 2 and parts[0].lower() in _GEO_PREFIXES:
+        parts = parts[1:]
+    return parts[0].lower() if parts else ""
+
+
 def _is_cohere_model(model_id: str) -> bool:
-    return model_id.split(".", 1)[0].lower() == "cohere"
+    return _model_family(model_id) == "cohere"
 
 
 def _embed_request_body(model_id: str, text: str, input_type: str) -> dict:

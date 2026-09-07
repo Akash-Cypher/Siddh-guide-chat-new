@@ -246,3 +246,47 @@ def test_failed_reindex_leaves_the_existing_index_intact(monkeypatch, tmp_path):
         rag.build_index_from_json_folder(str(tmp_path))
 
     assert not collection.deleted, "existing vectors were destroyed by a failed re-index"
+
+
+# --------------------------------------------------------------------------- #
+# The provider must be readable from every legal form of a model setting.
+#
+# Where a model is only invocable through a cross-region inference profile, the
+# profile ARN is the only value that works - which is how NOVA_MODEL_ID is
+# already configured in production. Reading the provider from the first dotted
+# token sees "arn:aws:bedrock:ap-south-1:...:inference-profile/apac" and sends a
+# Cohere model Amazon's request body.
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    "model_id,family",
+    [
+        ("amazon.titan-embed-text-v2:0", "amazon"),
+        ("cohere.embed-multilingual-v3", "cohere"),
+        ("cohere.embed-v4:0", "cohere"),
+        ("apac.cohere.embed-v4:0", "cohere"),
+        ("us.amazon.nova-micro-v1:0", "amazon"),
+        (
+            "arn:aws:bedrock:ap-south-1:417311687123:inference-profile/apac.cohere.embed-v4:0",
+            "cohere",
+        ),
+        (
+            "arn:aws:bedrock:ap-south-1:417311687123:inference-profile/apac.amazon.nova-micro-v1:0",
+            "amazon",
+        ),
+    ],
+)
+def test_model_family_is_read_from_every_legal_form(model_id, family):
+    assert rag._model_family(model_id) == family
+
+
+def test_cohere_profile_arn_gets_cohere_request_body(monkeypatch):
+    """The whole point: an ARN must not silently fall back to Amazon's format."""
+    arn = "arn:aws:bedrock:ap-south-1:417311687123:inference-profile/apac.cohere.embed-v4:0"
+
+    body, vectors = _embed_with(
+        monkeypatch, arn, {"embeddings": {"float": [[0.7, 0.8]]}}, input_type="search_query"
+    )
+
+    assert "texts" in body, "a Cohere profile ARN was sent Amazon's inputText body"
+    assert body["input_type"] == "search_query"
+    assert vectors == [[0.7, 0.8]]
