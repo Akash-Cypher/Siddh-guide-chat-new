@@ -63,7 +63,52 @@ def init_rag() -> None:
     _get_collection()
 
 
-def _embed_texts(texts: List[str]) -> List[List[float]]:
+def _is_cohere_model(model_id: str) -> bool:
+    return model_id.split(".", 1)[0].lower() == "cohere"
+
+
+def _embed_request_body(model_id: str, text: str, input_type: str) -> dict:
+    """The request shape this embedding model expects.
+
+    Amazon and Cohere disagree on every field name, and the app used to hardcode
+    Amazon's. That made BEDROCK_EMBED_MODEL_ID only nominally configurable: if a
+    Titan model was unavailable in the region, there was no working value to
+    switch to without a code change. Switching provider is now a config change.
+    """
+    if _is_cohere_model(model_id):
+        # input_type is not optional for Cohere v3+: a passage and the question
+        # that should retrieve it are embedded differently, and using one type
+        # for both measurably degrades retrieval.
+        return {
+            "texts": [text],
+            "input_type": input_type,
+            "embedding_types": ["float"],
+        }
+    return {"inputText": text}
+
+
+def _embedding_from_payload(payload: dict) -> Optional[List[float]]:
+    """One vector out of whichever response shape the model returned."""
+    emb = payload.get("embedding")
+    if emb:
+        return emb
+
+    embeddings = payload.get("embeddings")
+    if isinstance(embeddings, dict):                 # Cohere with embedding_types
+        floats = embeddings.get("float") or embeddings.get("float_")
+        if floats:
+            return floats[0]
+    elif isinstance(embeddings, list) and embeddings:
+        first = embeddings[0]
+        return first if isinstance(first, list) else embeddings
+
+    return payload.get("vector")
+
+
+def _embed_texts(
+    texts: List[str], input_type: str = "search_document"
+) -> List[List[float]]:
+    """Embed each text. `input_type` is honoured by Cohere and ignored by Titan."""
     br = _get_bedrock()
     vectors: List[List[float]] = []
 
@@ -73,7 +118,7 @@ def _embed_texts(texts: List[str]) -> List[List[float]]:
             vectors.append([])
             continue
 
-        body = {"inputText": t}
+        body = _embed_request_body(BEDROCK_EMBED_MODEL_ID, t, input_type)
 
         try:
             resp = br.invoke_model(
@@ -91,7 +136,7 @@ def _embed_texts(texts: List[str]) -> List[List[float]]:
                 f"Bedrock embedding call failed: {type(exc).__name__}: {exc}"
             ) from exc
 
-        emb = payload.get("embedding") or payload.get("vector") or payload.get("embeddings")
+        emb = _embedding_from_payload(payload)
 
         if not emb:
             raise ModelBackendError(f"Bedrock returned no embedding: {payload}")
@@ -131,13 +176,6 @@ def _enrich_for_embedding(title: str, keywords, content: str) -> str:
 
 def build_index_from_json_folder(json_folder: str = "data") -> None:
     collection = _get_collection()
-
-    try:
-        existing = collection.get(include=[])
-        if existing and existing.get("ids"):
-            collection.delete(ids=existing["ids"])
-    except Exception:
-        logger.exception("failed clearing existing collection before re-index")
 
     docs = []
     used_ids = set()
@@ -206,7 +244,20 @@ def build_index_from_json_folder(json_folder: str = "data") -> None:
     documents = [d[1] for d in docs]
     metadatas = [d[2] for d in docs]
 
-    embeddings = _embed_texts(documents)
+    # Embed BEFORE clearing. The old order deleted every document first and only
+    # then called Bedrock, so any embedding failure - a denied model, a throttle,
+    # a timeout - left the collection permanently EMPTY, and every subsequent
+    # startup crawl wiped it again. Retrieval then found nothing and the
+    # assistant answered from no knowledge at all. Building the new vectors
+    # first means a failed refresh leaves the previous index serving.
+    embeddings = _embed_texts(documents, input_type="search_document")
+
+    try:
+        existing = collection.get(include=[])
+        if existing and existing.get("ids"):
+            collection.delete(ids=existing["ids"])
+    except Exception:
+        logger.exception("failed clearing existing collection before re-index")
 
     collection.add(ids=ids, documents=documents, metadatas=metadatas, embeddings=embeddings)
     logger.info("Ingested %s docs into Chroma at %s", len(ids), CHROMA_PATH)
@@ -222,7 +273,7 @@ def retrieve_hits(
         return []
 
     collection = _get_collection()
-    q_emb = _embed_texts([question])[0]
+    q_emb = _embed_texts([question], input_type="search_query")[0]
 
     try:
         results = collection.query(
