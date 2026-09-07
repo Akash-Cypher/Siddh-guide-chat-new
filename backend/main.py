@@ -87,9 +87,14 @@ REFUSAL_MESSAGE = (
 # above: the refusal claims the assistant can help with anything on the site,
 # which is a lie while every request is failing, and it tells the visitor to
 # rephrase a question that was never the problem.
+#
+# It also names no internal component. A visitor has no use for the word
+# "embedding" or "knowledge service", and a public chat window is not the place
+# to describe how the system is built. Operators get the detail instead, in the
+# ERROR log line and in response["status"] == "unavailable".
 SERVICE_UNAVAILABLE_MESSAGE = (
-    "I can\u2019t reach my knowledge service at the moment, so I can\u2019t answer "
-    "that right now. Please try again in a minute."
+    "Sorry, I couldn\u2019t look that up just now. "
+    "Please try again in a moment."
 )
 
 SESSION_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,100}$")
