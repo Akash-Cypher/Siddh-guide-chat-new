@@ -220,6 +220,23 @@ def test_short_response_is_an_error_not_a_misaligned_index(monkeypatch):
             "quota_throttled",
         ),
         (NoCredentialsError(), "NoCredentialsError", "no_aws_credentials_for_instance"),
+        (
+            # Verbatim message from the production Cohere failure. It contains
+            # "not authorized to perform" - the same phrase the generic IAM
+            # case matches on - which is exactly what made this misclassify as
+            # an IAM problem in production and cost hours of debugging a policy
+            # that was never wrong.
+            _client_error(
+                "AccessDeniedException",
+                "Model access is denied due to IAM user or service role is not "
+                "authorized to perform the required AWS Marketplace actions "
+                "(aws-marketplace:ViewSubscriptions, aws-marketplace:Subscribe) "
+                "to enable access to this model. ... Your AWS Marketplace "
+                "subscription for this model cannot be completed at this time.",
+            ),
+            "AccessDeniedException",
+            "marketplace_subscription_required_for_third_party_model",
+        ),
     ],
 )
 def test_self_check_reports_the_aws_error_code(monkeypatch, exc, code, hint):
@@ -234,6 +251,42 @@ def test_self_check_reports_the_aws_error_code(monkeypatch, exc, code, hint):
     assert status["error_type"] == code
     assert status["error_hint"] == hint
     assert status["dimension"] is None
+
+
+# --------------------------------------------------------------------------- #
+# Regression: an AWS Marketplace subscription denial must never read as an IAM
+# policy problem. This is the exact misdiagnosis that shipped to production -
+# Cohere's Marketplace-denial message contains "not authorized to perform",
+# which is also the generic IAM-denial phrase, and the IAM branch used to be
+# checked first. The fix must be Marketplace-vocabulary-first, not phrase-first.
+# --------------------------------------------------------------------------- #
+_MARKETPLACE_DENIAL = (
+    "Model access is denied due to IAM user or service role is not authorized "
+    "to perform the required AWS Marketplace actions (aws-marketplace:"
+    "ViewSubscriptions, aws-marketplace:Subscribe) to enable access to this "
+    "model. ... Your AWS Marketplace subscription for this model cannot be "
+    "completed at this time."
+)
+
+
+def test_marketplace_denial_is_never_misread_as_an_iam_policy_problem():
+    """The literal defect this task exists to fix: same code, same substring
+    ("not authorized to perform"), two completely different required fixes."""
+    hint = rag._error_hint("AccessDeniedException", _MARKETPLACE_DENIAL)
+
+    assert hint == "marketplace_subscription_required_for_third_party_model"
+    assert hint != "iam_policy_denies_bedrock_invokemodel_on_this_model"
+
+
+def test_plain_iam_denial_without_marketplace_wording_still_gets_the_iam_hint():
+    """The fix for the regression above must not swallow the real IAM case."""
+    hint = rag._error_hint(
+        "AccessDeniedException",
+        "User: arn:aws:sts::1:assumed-role/r/x is not authorized to perform: "
+        "bedrock:InvokeModel on resource: arn:aws:bedrock:ap-south-1::foundation-model/m",
+    )
+
+    assert hint == "iam_policy_denies_bedrock_invokemodel_on_this_model"
 
 
 def test_self_check_reports_unknown_model_family(monkeypatch):

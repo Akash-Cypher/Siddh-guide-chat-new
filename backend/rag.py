@@ -352,9 +352,22 @@ def _error_code(exc: BaseException) -> str:
 
 
 def _error_hint(code: str, message: str) -> str:
-    """Which fix the error points at. Stable tokens, safe to expose on /health."""
+    """Which fix the error points at. Stable tokens, safe to expose on /health.
+
+    AccessDeniedException covers three unrelated fixes, and AWS's wording
+    overlaps between them: the Marketplace-subscription message contains the
+    literal substring "not authorized to perform", which is also the generic
+    IAM-denial phrase. Checked first and by its distinctive vocabulary
+    (aws-marketplace:Subscribe / ViewSubscriptions), not by the phrase they
+    share, or every third-party-model Marketplace denial reads as an IAM
+    policy problem - which cost hours of misdirected debugging in production
+    (Cohere on Bedrock is an AWS Marketplace product; the account had no
+    subscription for it, and no IAM policy change could have fixed that).
+    """
     msg = (message or "").lower()
     if code == "AccessDeniedException":
+        if "aws-marketplace:subscribe" in msg or "aws-marketplace:viewsubscriptions" in msg:
+            return "marketplace_subscription_required_for_third_party_model"
         if "not authorized to perform" in msg:
             return "iam_policy_denies_bedrock_invokemodel_on_this_model"
         if "access to the model" in msg or "model access" in msg:
@@ -547,8 +560,10 @@ def build_index_from_json_folder(json_folder: str = "data") -> None:
         len(ids), CHROMA_PATH, BEDROCK_EMBED_MODEL_ID, dimension,
     )
     # A full re-index just embedded every document, which is a stronger proof
-    # than the boot probe. Record it, so an IAM fix followed by /admin/refresh
-    # turns /health green without waiting for the next restart.
+    # than the boot probe. Record it, so a fix to whatever was denying access
+    # (IAM policy, Bedrock model access, or an AWS Marketplace subscription -
+    # see _error_hint) followed by /admin/refresh turns /health green without
+    # waiting for the next restart.
     _embed_status.update({
         "checked": True, "ok": True,
         "model": BEDROCK_EMBED_MODEL_ID,

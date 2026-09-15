@@ -83,10 +83,19 @@ leaves the last-good data + index untouched.
 | `CRAWL_REBUILD_INDEX` | `1` | Re-embed into Chroma after each crawl (needs Bedrock/Titan access). |
 | `CRAWL_ADMIN_KEY` | — | Secret for `POST /admin/refresh` (defaults to `CHAT_API_KEY`). |
 | `NOVA_MODEL_ID` | — | **Required.** Bedrock Nova inference-profile ARN. The committed `.env` has a placeholder — set the real value in the deploy env. |
-| `BEDROCK_EMBED_MODEL_ID` | `amazon.titan-embed-text-v2:0` | Embedding model. Must be `amazon.titan-embed-*` or `cohere.embed-*`; anything else is refused at boot by name. |
+| `BEDROCK_EMBED_MODEL_ID` | `amazon.titan-embed-text-v2:0` | Embedding model. Must be `amazon.titan-embed-*` or `cohere.embed-*`; anything else is refused at boot by name. **The deployed service uses the Titan default** — see the Marketplace note below before switching to a `cohere.embed-*` model. |
 | `EMBED_SELF_CHECK` | `1` | Embed one probe string after boot and report the result on `/health` (`embedding.ok`, `error_type`, `error_hint`). |
 | `EMBED_BATCH_SIZE` | `96` | Texts per Bedrock call for Cohere models (Titan takes one per call). |
 | `EMBED_CONCURRENCY` | `8` | Parallel Bedrock calls for Titan models during a re-index. |
+
+> **Cohere embedding models are AWS Marketplace products, not first-party
+> Amazon models.** Granting `bedrock:InvokeModel` in IAM is not enough to use
+> one — the account also needs an active Marketplace subscription for that
+> specific model, requested from **Bedrock console → Model access**. Without
+> it, every call fails with `AccessDeniedException` even though the IAM policy
+> is correct. `amazon.titan-embed-*` models have no such requirement, which is
+> why they are the default and the model this service actually runs in
+> production.
 
 ### Is retrieval actually working?
 
@@ -98,11 +107,27 @@ counts and say nothing about whether the text was embedded. The fields that do:
 | `index_documents` | Vectors actually in Chroma. `0` means every knowledge-base question will be refused. |
 | `retrieval_ready` | `true` only when the embedding probe passed **and** the index is non-empty. |
 | `embedding.error_type` | The AWS error code from the boot probe, e.g. `AccessDeniedException`, `ValidationException`, `ResourceNotFoundException`, `ThrottlingException`. |
-| `embedding.error_hint` | Which fix that code points at: `iam_policy_denies_bedrock_invokemodel_on_this_model`, `bedrock_model_access_not_granted_in_region`, `request_body_does_not_match_model_family`, `model_id_not_available_in_region`, `quota_throttled`, `unknown_model_family`. |
+| `embedding.error_hint` | Which fix that code points at — see the table below. |
+
+`AccessDeniedException` alone does not say which of three unrelated problems
+occurred; only the message text does, and `error_hint` reads that text so you
+don't have to open CloudWatch:
+
+| `error_hint` | What it means | Where to fix it |
+|---|---|---|
+| `iam_policy_denies_bedrock_invokemodel_on_this_model` | The instance role's IAM policy does not grant `bedrock:InvokeModel` on this model's ARN. | IAM — add the model's `foundation-model` ARN to the role's policy. |
+| `bedrock_model_access_not_granted_in_region` | The AWS account has not enabled this model in this region at all. | Bedrock console → **Model access** → enable the model. |
+| `marketplace_subscription_required_for_third_party_model` | This is a third-party (e.g. Cohere) model sold through AWS Marketplace, and the account has no subscription for it. **No IAM policy change fixes this.** | Bedrock console → **Model access** → request access, which creates the Marketplace subscription — or switch to a first-party `amazon.titan-embed-*` model. |
+| `request_body_does_not_match_model_family` | `ValidationException` — the request shape doesn't match what this model expects. | Should not happen with a supported model id; check `BEDROCK_EMBED_MODEL_ID` is spelled correctly. |
+| `model_id_not_available_in_region` | `ResourceNotFoundException` — this model id doesn't exist in this region. | Use a model id available in `ap-south-1`, or change region. |
+| `quota_throttled` | Bedrock throttled or rate-limited the request. | Retry, or request a quota increase. |
+| `unknown_model_family` | `BEDROCK_EMBED_MODEL_ID` matches neither `amazon.titan-embed-*` nor `cohere.embed-*`. | Fix the env var. |
 
 The instance role needs `bedrock:InvokeModel` on the **embedding model's
 foundation-model ARN** (`arn:aws:bedrock:ap-south-1::foundation-model/<id>`)
-as well as on the Nova inference profile — the two are separate resources.
+as well as on the Nova inference profile — the two are separate resources —
+but for a Marketplace model, a correct IAM policy is necessary and not
+sufficient; the Marketplace subscription is a second, separate gate.
 
 ### Manual refresh (no redeploy)
 
