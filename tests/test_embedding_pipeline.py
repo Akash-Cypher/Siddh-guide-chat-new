@@ -367,6 +367,25 @@ def test_reindex_after_model_change_recreates_collection(monkeypatch, tmp_path):
     assert rag._get_collection().metadata.get("embed_dim") == 1024
 
 
+def test_successful_reindex_clears_a_failed_boot_probe(monkeypatch, tmp_path):
+    """IAM gets fixed, /admin/refresh runs: /health must go green without a restart."""
+    _reset_chroma(monkeypatch, tmp_path)
+    kb = _write_kb(tmp_path)
+    monkeypatch.setattr(rag, "BEDROCK_EMBED_MODEL_ID", "cohere.embed-multilingual-v3")
+
+    monkeypatch.setattr(rag, "_get_bedrock", lambda: _Bedrock(exc=_client_error(
+        "AccessDeniedException", "is not authorized to perform: bedrock:InvokeModel")))
+    assert rag.embedding_self_check()["ok"] is False
+
+    monkeypatch.setattr(rag, "_get_bedrock", lambda: _Bedrock(dim=1024))
+    rag.build_index_from_json_folder(kb)
+
+    status = rag.embedding_status()
+    assert status["ok"] is True
+    assert status["dimension"] == 1024
+    assert status["error_type"] is None
+
+
 def test_collection_survives_a_restart_on_the_same_model(monkeypatch, tmp_path):
     """Recreation is for model changes only. A plain restart must keep serving
     the existing vectors."""

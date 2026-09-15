@@ -546,6 +546,16 @@ def build_index_from_json_folder(json_folder: str = "data") -> None:
         "Ingested %s docs into Chroma at %s (model=%s, dimension=%s)",
         len(ids), CHROMA_PATH, BEDROCK_EMBED_MODEL_ID, dimension,
     )
+    # A full re-index just embedded every document, which is a stronger proof
+    # than the boot probe. Record it, so an IAM fix followed by /admin/refresh
+    # turns /health green without waiting for the next restart.
+    _embed_status.update({
+        "checked": True, "ok": True,
+        "model": BEDROCK_EMBED_MODEL_ID,
+        "family": embedding_family(BEDROCK_EMBED_MODEL_ID),
+        "dimension": dimension,
+        "error_type": None, "error_hint": None,
+    })
 
 
 def retrieve_hits(
