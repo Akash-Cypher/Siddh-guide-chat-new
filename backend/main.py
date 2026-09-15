@@ -29,6 +29,7 @@ from config import (
     CRAWL_ADMIN_KEY,
     CRAWL_INTERVAL_HOURS,
     CRAWL_ON_STARTUP,
+    EMBED_SELF_CHECK,
     ENFORCE_API_KEY,
     FAQ_PATH,
     HISTORY_LIMIT,
@@ -45,7 +46,13 @@ from config import (
 )
 from errors import ModelBackendError
 from models import generate_answer, generate_social_reply
-from rag import init_rag, retrieve_hits
+from rag import (
+    embedding_self_check,
+    embedding_status,
+    index_count,
+    init_rag,
+    retrieve_hits,
+)
 
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),
@@ -386,8 +393,17 @@ def _run_refresh_and_reload() -> dict:
     return summary
 
 
-async def _crawl_loop() -> None:
+async def _crawl_loop(after: Optional[asyncio.Task] = None) -> None:
     try:
+        if after is not None:
+            # The embedding self-check learns the vector dimension and replaces
+            # a collection written by a different model. Let it finish first so
+            # the initial re-index inserts into the right collection.
+            try:
+                await after
+            except Exception:
+                pass
+
         if CRAWL_ON_STARTUP:
             logger.info("auto-crawl: running initial refresh in background")
             await asyncio.to_thread(_run_refresh_and_reload)
@@ -440,9 +456,17 @@ async def lifespan(app: FastAPI):
         else "UNAVAILABLE (knowledge-base answers will be the outage notice)",
     )
 
+    # Embed one probe string so a denied or misnamed embedding model is the
+    # first thing in the logs and a field on /health - not an empty index
+    # discovered from a visitor's screenshot. Off the boot path so a slow or
+    # hanging Bedrock call cannot fail the App Runner health check.
+    check_task: Optional[asyncio.Task] = None
+    if EMBED_SELF_CHECK and rag_ready:
+        check_task = asyncio.create_task(asyncio.to_thread(embedding_self_check))
+
     crawl_task: Optional[asyncio.Task] = None
     if AUTO_CRAWL:
-        crawl_task = asyncio.create_task(_crawl_loop())
+        crawl_task = asyncio.create_task(_crawl_loop(after=check_task))
         logger.info(
             "auto-crawl enabled (on_startup=%s interval=%sh)",
             CRAWL_ON_STARTUP,
@@ -452,12 +476,13 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        if crawl_task is not None:
-            crawl_task.cancel()
-            try:
-                await crawl_task
-            except (asyncio.CancelledError, Exception):
-                pass
+        for task in (crawl_task, check_task):
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
 
 
 app = FastAPI(title=APP_TITLE, lifespan=lifespan)
@@ -3151,6 +3176,12 @@ def _rag_answer_response(
 
 @app.get("/health")
 def health() -> Dict:
+    # courses_live / website_entries are CRAWL counts. They say nothing about
+    # whether that text was ever embedded. index_documents is the vector store
+    # itself, and `embedding` is the boot-time probe of the embedding model -
+    # together they are what "retrieval works" actually means.
+    documents = index_count()
+    embed = embedding_status()
     return {
         "status": "ok",
         "courses_live": len(COURSE_CATALOG),
@@ -3161,6 +3192,20 @@ def health() -> Dict:
         # so a broken deploy looked healthy. Booleans only - no values.
         "nova_model_configured": bool(NOVA_MODEL_ID),
         "chat_api_key_configured": bool(CHAT_API_KEY),
+        "index_documents": documents,
+        "retrieval_ready": bool(embed.get("ok") and documents),
+        # Model id, family, vector width, and on failure the AWS error code and
+        # which fix it points at. No secrets: the id is a public model name and
+        # the error detail stays in the logs.
+        "embedding": {
+            "model": embed.get("model"),
+            "family": embed.get("family"),
+            "checked": embed.get("checked"),
+            "ok": embed.get("ok"),
+            "dimension": embed.get("dimension"),
+            "error_type": embed.get("error_type"),
+            "error_hint": embed.get("error_hint"),
+        },
     }
 
 

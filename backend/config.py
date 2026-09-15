@@ -67,6 +67,16 @@ CHROMA_PATH = os.getenv("CHROMA_PATH", str(BASE_DIR / "chroma_db"))
 CHROMA_COLLECTION = os.getenv("CHROMA_COLLECTION", "sidh_guide")
 BEDROCK_EMBED_MODEL_ID = os.getenv("BEDROCK_EMBED_MODEL_ID", "amazon.titan-embed-text-v2:0")
 
+# Embedding throughput. Cohere accepts up to 96 texts per request; Titan takes
+# exactly one, so Titan is parallelised across threads instead. Both bound the
+# work done on every container start (the full index is rebuilt on boot).
+EMBED_BATCH_SIZE = _get_int("EMBED_BATCH_SIZE", 96)
+EMBED_CONCURRENCY = _get_int("EMBED_CONCURRENCY", 8)
+# Embed one probe string at boot and report the result on /health. A denied or
+# misnamed embedding model used to fail silently behind a healthy /health while
+# the vector index stayed empty. Off only for hermetic tests.
+EMBED_SELF_CHECK = _get_bool("EMBED_SELF_CHECK", True)
+
 # You should set this explicitly in env for each environment
 NOVA_MODEL_ID = os.getenv("NOVA_MODEL_ID", "").strip()
 
