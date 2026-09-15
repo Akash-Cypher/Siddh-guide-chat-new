@@ -11,27 +11,46 @@ foundation's own websites (KB-only, no general-knowledge answers).
 
 ```mermaid
 flowchart TD
-  U[User / WordPress Frontend] -->|HTTP POST /chat| API[FastAPI Backend (Uvicorn)]
-  U -->|HTTP GET /health| API
+  U[Visitor - Ask Sid widget] -->|POST /wp-json/siddh/v1/chat| PX[WordPress plugin proxy<br/>rate limit 15/min - 120/hr<br/>attaches x-api-key server-side]
+  PX -->|HTTPS + x-api-key| API[FastAPI on AWS App Runner]
 
-  API --> G{Greeting?}
-  G -->|Yes| L1[Local Greeting Response]
-  G -->|No| F{FAQ Match?}
-  F -->|Yes| L2[FAQ Answer from data/faq.json]
-  F -->|No| RAG[RAG Retrieve Hits]
+  API --> AUTH[API key + session_id gate]
+  AUTH --> FIX[Spell-correct a copy<br/>routing decision only]
+  FIX --> HIST[(DynamoDB SiddhGuideChat<br/>read last 8 turns - write this one<br/>30-day TTL)]
+  HIST --> R{Router - 12 ordered checks}
 
-  RAG --> VDB[(Chroma Vector DB\nchroma_db/ persistent)]
-  RAG --> EMB[Amazon Titan Embeddings\n(encode query + docs)]
+  R -->|greeting / small talk /<br/>about-bot / capability| SOC[Nova writes a social reply<br/>no KB data supplied]
+  R -->|"what is my field?"| SESS[Answered from this session's turns]
+  R -->|count / newest / list| CAT[Rendered from courses_catalog.json<br/>figures counted in code, never by the model]
+  R -->|prompt injection| REF[KB-only refusal]
+  R -->|curated FAQ hit| FAQ[data/faq.json]
+  R -->|everything else| EMB[Titan Embeddings v2<br/>encode the question]
 
-  VDB --> VAL{Validated KB context\nwith citations?}
-  VAL -->|No| REF[KB-only refusal]
-  VAL -->|Yes| LLM[Amazon Bedrock Nova\n(generate grounded answer)]
-  LLM --> OUT{Answer supported by KB?}
+  EMB --> VDB[(Chroma - container-local<br/>top-3, cosine distance <= 0.45)]
+  VDB --> VAL{Usable context<br/>with citations?}
+  VAL -->|No| FB[Fallback 1: catalog row for the course in play<br/>Fallback 2: full catalog + site overview]
+  VAL -->|Yes| LLM[Amazon Bedrock Nova<br/>grounded answer]
+  FB --> LLM
+  LLM --> OUT{Grounding validator<br/>prompt echo? meta leak?<br/>every word/number in context?}
   OUT -->|No| REF
-  OUT -->|Yes| API
-  REF --> API
-  API --> U
+  OUT -->|Yes| OK[Answer + citations]
+
+  SOC --> OK
+  SESS --> OK
+  CAT --> OK
+  FAQ --> OK
+  REF --> OK
+  OK --> HIST
+  OK --> PX --> U
+
+  CRAWL[Auto-crawler<br/>boot + every 24h + WP publish + admin button] --> DATA[data/*.json]
+  DATA -->|Titan re-embed| VDB
 ```
+
+Other routes: `GET /health` (KB counts + `auto_crawl`), `GET /history/{session_id}`,
+`POST /admin/refresh`. There is **no answer cache** — an earlier one was removed
+because cached entries carried no retrieval context or citations, so they could
+not be re-validated against the knowledge base after a crawl.
 
 ## Live auto-crawler (keeps the knowledge base fresh)
 
@@ -40,9 +59,10 @@ the **live** websites by `backend/crawler.py` and re-embedded into Chroma by
 `backend/refresh.py`.
 
 **What it crawls** (via WordPress sitemaps + REST):
-- Every enrollable Siksha course (WooCommerce `product` type — currently **38**,
-  excluding the non-course "EIE Quiz" and "Gift Coupon"). Drives the dynamic
-  course count/list.
+- Every enrollable Siksha course (WooCommerce `product` type — **32** in the
+  committed snapshot, excluding the non-course "EIE Quiz" and "Gift Coupon").
+  Drives the dynamic course count/list, so the live number is whatever the last
+  crawl found — check `GET /health` (`courses_live`) rather than this line.
 - All key pages: home, about, Siksha, Aajivan, Sandhaan (+ linguistics / jyotisha
   / yoga / kosha / shastra-maps), Shodha (+ siddhanta-prastuti / indic-thought-models
   / conscious-enterprise-management), Prakashan, Events, Contact, all policies.
@@ -63,6 +83,26 @@ leaves the last-good data + index untouched.
 | `CRAWL_REBUILD_INDEX` | `1` | Re-embed into Chroma after each crawl (needs Bedrock/Titan access). |
 | `CRAWL_ADMIN_KEY` | — | Secret for `POST /admin/refresh` (defaults to `CHAT_API_KEY`). |
 | `NOVA_MODEL_ID` | — | **Required.** Bedrock Nova inference-profile ARN. The committed `.env` has a placeholder — set the real value in the deploy env. |
+| `BEDROCK_EMBED_MODEL_ID` | `amazon.titan-embed-text-v2:0` | Embedding model. Must be `amazon.titan-embed-*` or `cohere.embed-*`; anything else is refused at boot by name. |
+| `EMBED_SELF_CHECK` | `1` | Embed one probe string after boot and report the result on `/health` (`embedding.ok`, `error_type`, `error_hint`). |
+| `EMBED_BATCH_SIZE` | `96` | Texts per Bedrock call for Cohere models (Titan takes one per call). |
+| `EMBED_CONCURRENCY` | `8` | Parallel Bedrock calls for Titan models during a re-index. |
+
+### Is retrieval actually working?
+
+`GET /health` reports `courses_live` and `website_entries` — those are **crawl**
+counts and say nothing about whether the text was embedded. The fields that do:
+
+| Field | Meaning |
+|---|---|
+| `index_documents` | Vectors actually in Chroma. `0` means every knowledge-base question will be refused. |
+| `retrieval_ready` | `true` only when the embedding probe passed **and** the index is non-empty. |
+| `embedding.error_type` | The AWS error code from the boot probe, e.g. `AccessDeniedException`, `ValidationException`, `ResourceNotFoundException`, `ThrottlingException`. |
+| `embedding.error_hint` | Which fix that code points at: `iam_policy_denies_bedrock_invokemodel_on_this_model`, `bedrock_model_access_not_granted_in_region`, `request_body_does_not_match_model_family`, `model_id_not_available_in_region`, `quota_throttled`, `unknown_model_family`. |
+
+The instance role needs `bedrock:InvokeModel` on the **embedding model's
+foundation-model ARN** (`arn:aws:bedrock:ap-south-1::foundation-model/<id>`)
+as well as on the Nova inference profile — the two are separate resources.
 
 ### Manual refresh (no redeploy)
 
