@@ -819,6 +819,110 @@ def test_genuine_recommendation_requests_still_route(monkeypatch, message):
     assert main._is_recommendation_request(message) or main.mentions_catalog_subject(message)
 
 
+# ---------------------------------- naming a non-course page is not a recommendation
+
+PRASTUTI_ENTRY = {
+    "id": "shodha-siddhanta-prastuti",
+    "category": "research",
+    "title": "Shodha - Siddhanta Prastuti",
+    "content": (
+        "Siddhanta-prastuti: Concept-based Shaastra Course Development is a "
+        "research immersion programme for Sanskrit and shaastra scholars."
+    ),
+}
+PRASTUTI_MESSAGE = "Siddhanta-prastuti: Concept-based Shaastra Course Development"
+
+# The synthetic CATALOG above has no word in common with PRASTUTI_MESSAGE, so
+# mentions_catalog_subject() would return False against it regardless of the
+# fix - these tests would pass even if the guard were deleted. Add one entry
+# that shares a word with the message, exactly reproducing the real catalog:
+# the live courses_catalog.json genuinely contains "shaastra" and
+# "development" in real course titles/categories, which is what let
+# mentions_catalog_subject() match PRASTUTI_MESSAGE in production.
+PRASTUTI_CATALOG = CATALOG + [
+    {"title": "Shaastra Course Development for Scholars",
+     "categories": ["research", "shaastra"], "published": "2025-06-15"},
+]
+
+
+def test_named_research_programme_is_not_a_catalog_subject_match(monkeypatch):
+    """Reproduces a reported production failure.
+
+    The message is the title of a real research programme page - not a
+    request for a course recommendation - but it contains "course" and
+    "development", and "shaastra" is a distinctive word in the live catalog
+    too (it appears in real course titles/categories), so it satisfied
+    mentions_catalog_subject() outright and was routed to
+    _recommend_courses_response, which recommended three unrelated
+    enrollable courses instead of answering about the programme actually named.
+    """
+    monkeypatch.setattr(main, "WEBSITE_DATA", [PRASTUTI_ENTRY])
+    monkeypatch.setattr(main, "COURSE_DATA", [])
+    monkeypatch.setattr(main, "COURSE_CATALOG", PRASTUTI_CATALOG)
+
+    # Sanity check that this catalog genuinely reproduces the trigger: without
+    # the WEBSITE_DATA guard, the shared word alone is enough to match.
+    assert "shaastra" in main._distinctive_catalog_terms()
+
+    assert not main.mentions_catalog_subject(PRASTUTI_MESSAGE)
+    assert not main._is_recommendation_request(PRASTUTI_MESSAGE)
+
+
+def test_a_recommend_verb_naming_a_non_course_page_is_also_not_hijacked(monkeypatch):
+    """Defence in depth for _is_recommendation_request's own guard: an explicit
+    recommend/suggest verb must not override a specific, named non-course page
+    either."""
+    monkeypatch.setattr(main, "WEBSITE_DATA", [PRASTUTI_ENTRY])
+    monkeypatch.setattr(main, "COURSE_DATA", [])
+    monkeypatch.setattr(main, "COURSE_CATALOG", PRASTUTI_CATALOG)
+
+    assert not main._is_recommendation_request(
+        "can you recommend something like Siddhanta Prastuti"
+    )
+
+
+def test_naming_a_real_course_is_still_a_recommendation_guard_as_before(monkeypatch):
+    """The new website-entity guard must not weaken the existing course guard."""
+    monkeypatch.setattr(main, "WEBSITE_DATA", [])
+    monkeypatch.setattr(main, "COURSE_DATA", [
+        {"title": "Samskrit 1: Thinking in Samskrit", "content": "..."}
+    ])
+    monkeypatch.setattr(main, "COURSE_CATALOG", CATALOG)
+
+    assert not main._is_recommendation_request(
+        "recommend me Samskrit 1: Thinking in Samskrit"
+    )
+
+
+def test_a_named_research_programme_is_answered_from_rag_not_recommended(client, rec, monkeypatch):
+    """End-to-end: the exact reported message must reach RAG and be answered
+    about the programme it names, never routed into a course recommendation."""
+    monkeypatch.setattr(main, "WEBSITE_DATA", [PRASTUTI_ENTRY])
+    monkeypatch.setattr(main, "COURSE_CATALOG", PRASTUTI_CATALOG)
+
+    def _must_not_be_called(*a, **k):
+        raise AssertionError(
+            "a named research programme must not be routed as a course recommendation"
+        )
+
+    monkeypatch.setattr(main, "_recommend_courses_response", _must_not_be_called)
+    monkeypatch.setattr(main, "retrieve_hits", lambda query, **k: [{
+        "document": PRASTUTI_ENTRY["content"],
+        "source": "website.json",
+        "title": PRASTUTI_ENTRY["title"],
+        "distance": 0.05,
+    }])
+    rec.answer = (
+        "Siddhanta-prastuti is a research immersion programme for Sanskrit "
+        "and shaastra scholars."
+    )
+
+    out = ask(client, PRASTUTI_MESSAGE)
+
+    assert out["status"] == "ok"
+    assert "research immersion" in out["answer"].lower()
+
+
 # ------------------------------------------- the site is more than courses
 
 SITE = [
@@ -1130,6 +1234,38 @@ def test_one_named_course_still_becomes_the_course_under_discussion(monkeypatch)
         [{"role": "assistant", "text": "Samskrit 1: Thinking in Samskrit is online."}]
     )
     assert profile["preferred_course"] == "Samskrit 1: Thinking in Samskrit"
+
+
+def test_a_multi_course_recommendation_does_not_become_the_course_under_discussion(monkeypatch):
+    """A recommendation offering 2-3 CANDIDATES is not "a course under
+    discussion" - the visitor has not chosen between them yet.
+
+    Reproduces a reported production failure: the assistant recommended three
+    courses, and a vague follow-up ("tell me in short what it is") was then
+    answered - confidently and wrongly - about whichever course happened to be
+    listed first, which the visitor never indicated they meant. The len(hits)
+    <= 3 guard let exactly this case through, since _recommend_courses_response
+    itself returns 1-3 courses by design.
+    """
+    monkeypatch.setattr(main, "COURSE_CATALOG", CATALOG)
+    recommendation = (
+        "Indian Knowledge Systems for Engineers - fits your background.\n"
+        "Vedic Mathematics Foundations - also relevant.\n"
+        "Indic Business and Commerce Traditions - worth considering."
+    )
+    profile = main._session_profile([{"role": "assistant", "text": recommendation}])
+    assert profile["preferred_course"] == ""
+
+
+def test_a_two_course_recommendation_also_does_not_lock_in(monkeypatch):
+    """Same as above at the smallest ambiguous size: two candidates, not one."""
+    monkeypatch.setattr(main, "COURSE_CATALOG", CATALOG)
+    recommendation = (
+        "Indian Knowledge Systems for Engineers - fits your background.\n"
+        "Vedic Mathematics Foundations - also relevant."
+    )
+    profile = main._session_profile([{"role": "assistant", "text": recommendation}])
+    assert profile["preferred_course"] == ""
 
 
 def test_catalog_titles_are_ordered_by_where_they_appear(monkeypatch):

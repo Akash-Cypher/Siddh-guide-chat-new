@@ -2318,13 +2318,21 @@ def _session_profile(recent_messages: Optional[list[dict]]) -> dict:
         # but only ever accepted if it is a real catalog title.
         if not profile["preferred_course"] and COURSE_CATALOG:
             hits = _catalog_titles_in(text)
-            # A message naming many courses is a LIST, not a discussion of one of
-            # them. This used to take the first match in catalog order, so after
-            # the assistant listed every course the "course under discussion"
-            # became whichever row happened to be first in the catalog — and a
-            # visitor picking a course off that list was then answered from a
-            # completely unrelated course's row.
-            if hits and len(hits) <= 3:
+            # Exactly one course names the topic of this turn. Naming several is
+            # not that: it is either a full listing (this used to take the first
+            # match in CATALOG order, so after the assistant listed every course
+            # the "course under discussion" became whichever row happened to be
+            # first in the data file — and a visitor picking a course off that
+            # list was answered from a completely unrelated course's row), or a
+            # recommendation offering 1-3 CANDIDATES the visitor has not chosen
+            # between yet (_recommend_courses_response deliberately returns up to
+            # three). Accepting "<= 3" fixed the first case but not the second:
+            # a 2-3 course recommendation still silently locked onto whichever
+            # course the model happened to list first, and a vague follow-up
+            # ("what is it", "how much is it") was then answered — confidently
+            # and wrongly — about an option the visitor never indicated they
+            # wanted. Only a single named course is unambiguous.
+            if len(hits) == 1:
                 profile["preferred_course"] = hits[0]
 
         # Self-described facts come from the user only. Assistant text is model
@@ -2501,6 +2509,32 @@ _STUDY_INTENT_RE = re.compile(
 )
 
 
+def _names_non_course_website_entity(message: str) -> bool:
+    """True when the message clearly names a specific, non-course page or
+    programme elsewhere on the site (Siddhanta Prastuti, a Sandhaan sub-page,
+    a policy page, ...).
+
+    Recommendation routing only ever offers COURSE_DATA/COURSE_CATALOG
+    courses, so a message that already names a different, specific thing on
+    the site is a question about that thing, not a request for a course
+    recommendation — even when it happens to also contain the word "course"
+    or another word that is coincidentally common in real course titles.
+    "Siddhanta-prastuti: Concept-based Shaastra Course Development" is the
+    title of a research programme page, not a request to recommend a course,
+    but it was matched as one: it contains "course" and "development", and
+    "shaastra" is a distinctive word in the live catalog too, so it satisfied
+    mentions_catalog_subject() outright. Matching here reuses
+    _website_entry_for_query's precise, phrase-based identification (the same
+    logic that resolves "siddhanta prastuti" / "sandhaan" / policy names to
+    one exact entry), so this cannot misfire on loose keyword overlap the way
+    the catalog-term check can.
+    """
+    if not WEBSITE_DATA:
+        return False
+    entry = _website_entry_for_query(message)
+    return bool(entry) and not _is_website_course_entry(entry)
+
+
 def _is_recommendation_request(message: str) -> bool:
     msg = _norm(message)
     study_intent = bool(_STUDY_INTENT_RE.search(msg))
@@ -2508,6 +2542,8 @@ def _is_recommendation_request(message: str) -> bool:
         return False
     # If a specific course is named, it's a detail question, not a recommendation.
     if COURSE_DATA and find_course_title_in_message(message, COURSE_DATA):
+        return False
+    if _names_non_course_website_entity(message):
         return False
     if study_intent:
         return True
@@ -2572,6 +2608,13 @@ def mentions_catalog_subject(message: str) -> bool:
     # Either the message says "course/programme", or it asks whether something
     # exists ("do you have anything on agriculture") — both are course queries.
     if not (_MENTIONS_COURSE_RE.search(msg) or _AVAILABILITY_RE.search(msg)):
+        return False
+
+    # A message can trip the course-word gate above while actually naming a
+    # specific, different thing on the site (see _names_non_course_website_entity
+    # for the production case this fixes). That is a question about the named
+    # entity, not a course-subject match, however many catalog words it shares.
+    if _names_non_course_website_entity(message):
         return False
 
     terms = _distinctive_catalog_terms()
