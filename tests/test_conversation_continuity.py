@@ -800,6 +800,64 @@ def test_identity_questions_still_work(message):
     assert main.is_about_bot(message)
 
 
+# ------------------------------------------- self-description must be first-person
+
+RESEARCH_SITE = [
+    {"category": "research", "title": "Shodha - Indic Thought Models", "content": "..."},
+]
+
+# The actual leaked text reported in production: the model copied the old
+# instruction ("you are Ask Sid, the assistant for Siddhanta Knowledge
+# Foundation, and you can help with ... research, publications, events and the
+# platforms") back almost verbatim, in the second person, instead of answering.
+LEAKED_ECHO = (
+    "You are Ask Sid, the assistant for the Siddhanta Knowledge Foundation, "
+    "and I can help with information on research, publications, events, and "
+    "the foundation's platforms."
+)
+
+
+def test_second_person_self_description_is_rejected(monkeypatch):
+    """A self-description can never correctly say "you are Ask Sid" - that
+    addresses the visitor as the bot. Must fall back, not reach a visitor."""
+    monkeypatch.setattr(main, "WEBSITE_DATA", RESEARCH_SITE)
+    monkeypatch.setattr(main, "generate_answer", lambda **k: LEAKED_ECHO)
+
+    assert main._describe_self("identity", "who are you", "req-1") == ""
+
+
+@pytest.mark.parametrize("opener", ["You are Ask Sid", "you're Ask Sid", "You're the assistant"])
+def test_second_person_openers_are_all_caught(monkeypatch, opener):
+    monkeypatch.setattr(main, "WEBSITE_DATA", RESEARCH_SITE)
+    monkeypatch.setattr(main, "generate_answer", lambda **k: f"{opener} for Siddhanta.")
+
+    assert main._describe_self("identity", "who are you", "req-1") == ""
+
+
+def test_first_person_self_description_still_works(monkeypatch):
+    """The new guard must not reject a normal, correct answer."""
+    monkeypatch.setattr(main, "WEBSITE_DATA", RESEARCH_SITE)
+    monkeypatch.setattr(
+        main, "generate_answer",
+        lambda **k: "I'm Ask Sid, the assistant for Siddhanta Knowledge Foundation. "
+                    "I can help with courses, research, publications and events.",
+    )
+
+    answer = main._describe_self("identity", "who are you", "req-1")
+    assert answer.startswith("I'm Ask Sid")
+
+
+def test_a_leaked_identity_answer_falls_back_to_the_fixed_reply(client, rec, monkeypatch):
+    """End-to-end: if the model echoes the prompt, the visitor still gets the
+    correct, fixed self-description - never the broken leaked text."""
+    monkeypatch.setattr(main, "WEBSITE_DATA", RESEARCH_SITE)
+    rec.answer = LEAKED_ECHO
+    out = ask(client, "who are you")
+
+    assert out["answer"] == main.ABOUT_BOT_REPLY
+    assert "You are Ask Sid" not in out["answer"]
+
+
 @pytest.mark.parametrize(
     "message", ["suggest a good movie", "recommend a stock to buy", "suggest a restaurant"]
 )

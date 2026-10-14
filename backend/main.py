@@ -2872,22 +2872,35 @@ def _describe_self(kind: str, user_message: str, request_id: str) -> str:
     if not site_ctx:
         return ""
 
+    # Deliberately NOT written as a sentence to copy ("say: you are Ask Sid...").
+    # A dictated-sounding instruction is exactly what a small model parrots back
+    # verbatim instead of answering - which is how "You are Ask Sid, the
+    # assistant for..." (second person, reciting the instruction) reached a
+    # visitor instead of "I'm Ask Sid...". Described as a task instead, with an
+    # explicit person/voice rule, so there is nothing answer-shaped to copy.
     ask = (
-        "Describe in two short sentences what you can help this visitor with. "
-        "Cover the breadth shown in the context - the courses AND the other areas "
-        "such as research, publications, events and the platforms. Do not list "
-        "every item and do not use bullet points."
+        "In your own words, in two short sentences, describe what you (Ask Sid) "
+        "can help this visitor with. Cover the breadth shown in the context - "
+        "courses AND the other areas such as research, publications, events and "
+        "the platforms - without listing every item or using bullet points."
         if kind == "capability"
         else
-        "Say who you are in two short sentences: you are Ask Sid, the assistant "
-        "for Siddhanta Knowledge Foundation, and you can help with what the "
-        "context shows the websites cover - courses as well as research, "
-        "publications, events and the platforms. Do not list every item."
+        "In your own words, in two short sentences, introduce yourself to this "
+        "visitor: your name (Ask Sid), who you work for (Siddhanta Knowledge "
+        "Foundation), and in general terms what the websites you know about "
+        "cover - courses as well as research, publications, events and the "
+        "platforms - without listing every item."
+    )
+    voice_rule = (
+        "Write in your own voice, first person ('I'm Ask Sid...', 'I can "
+        "help...'). Never write in the second person ('you are...', "
+        "'you can...') - that addresses the visitor, not yourself, and is wrong "
+        "here no matter how the question was phrased."
     )
 
     try:
         answer = generate_answer(
-            user_message=f"Visitor asked: {user_message}\n{ask}",
+            user_message=f"Visitor asked: {user_message}\n{ask} {voice_rule}",
             context=site_ctx,
         )
     except ModelBackendError:
@@ -2899,6 +2912,16 @@ def _describe_self(kind: str, user_message: str, request_id: str) -> str:
 
     answer = _strip_embedded_refusal(answer or "").strip()
     if not answer or len(answer) > 420 or _looks_like_idk(answer):
+        return ""
+    # Safety net, not just a prompting hope: a self-description can only ever be
+    # correct in first person. "You are/you're Ask Sid..." is always a defect -
+    # the model addressing the visitor as itself, usually by echoing the prompt
+    # back - and must fall back to the fixed reply rather than reach a visitor.
+    if re.match(r"^\s*you'?(?:re| are)\b", answer, re.IGNORECASE):
+        logger.info(
+            "[%s] self-description rejected: second-person (prompt echo)",
+            request_id,
+        )
         return ""
     return answer
 
