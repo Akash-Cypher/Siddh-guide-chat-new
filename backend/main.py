@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import config_overlay
 import contextvars
 import difflib
 import json
@@ -381,6 +382,26 @@ def _reload_kb_from_disk() -> None:
         len(WEBSITE_DATA),
         len(COURSE_CATALOG),
     )
+
+
+def _current_faq_data() -> list:
+    """faq_data, or the SKF Admin Console's override when one is set (system
+    "asksid", key "faq_json" - a JSON array of {"keywords": [...], "answer":
+    "..."} entries, same shape as faq.json). Checked on every call rather
+    than only at reload time, so an edit from the console takes effect
+    within config_overlay's own cache TTL (60s by default) with no crawl, no
+    restart, no redeploy. Falls back to the bundled faq_data whenever the
+    override is unset or fails to parse as a list.
+    """
+    override = config_overlay.get("asksid", "faq_json", default=None)
+    if override:
+        try:
+            parsed = json.loads(override) if isinstance(override, str) else override
+            if isinstance(parsed, list):
+                return parsed
+        except (TypeError, ValueError):
+            pass
+    return faq_data
 
 
 def _run_refresh_and_reload() -> dict:
@@ -1680,7 +1701,7 @@ def get_faq_answer(message: str) -> Optional[str]:
         "knowledge", "meta"
     }
 
-    for item in faq_data:
+    for item in _current_faq_data():
         for keyword in item.get("keywords", []):
             kw = _norm(keyword).lower()
             if not kw:
@@ -1707,7 +1728,7 @@ def get_faq_answer(message: str) -> Optional[str]:
 
 
 def get_why_choose_siddhanta_answer() -> Optional[str]:
-    for item in faq_data:
+    for item in _current_faq_data():
         answer = (item.get("answer") or "").strip()
         if "Siddhanta Knowledge Foundation" not in answer:
             continue
